@@ -260,15 +260,44 @@ export async function getPackageDetail(pkgName: string): Promise<PackageInfo | n
 
 // ─── 版本检查 ────────────────────────────────────────────
 
-export async function checkForUpdates(): Promise<Array<PackageInfo & { hasUpdate: boolean }>> {
+export interface UpdateInfo extends PackageInfo {
+  hasUpdate: boolean;
+  pinned?: boolean;
+  skipReason?: string;
+}
+
+export async function checkForUpdates(): Promise<UpdateInfo[]> {
   const installed = getInstalledPackages();
-  const results: Array<PackageInfo & { hasUpdate: boolean }> = [];
+  const results: UpdateInfo[] = [];
 
   for (const pkg of installed) {
+    if (pkg.sourceType && pkg.sourceType !== "npm") {
+      results.push({
+        ...pkg,
+        hasUpdate: false,
+        skipReason: pkg.sourceType === "git"
+          ? "git source: use pi update <source>@ref"
+          : pkg.sourceType === "local"
+          ? "local path: managed manually"
+          : "unknown source",
+      });
+      continue;
+    }
+
+    if (isPinnedSource(pkg.source)) {
+      results.push({
+        ...pkg,
+        hasUpdate: false,
+        pinned: true,
+        skipReason: "pinned version",
+      });
+      continue;
+    }
+
     try {
       const npmName = normalizeNpmPackageName(pkg.name);
       if (!npmName) {
-        results.push({ ...pkg, hasUpdate: false });
+        results.push({ ...pkg, hasUpdate: false, skipReason: "unsupported source" });
         continue;
       }
 
@@ -276,22 +305,39 @@ export async function checkForUpdates(): Promise<Array<PackageInfo & { hasUpdate
       const response = await fetch(url, {
         headers: { Accept: "application/json" },
       });
-      if (!response.ok) continue;
+      if (!response.ok) {
+        results.push({ ...pkg, hasUpdate: false, skipReason: `registry ${response.status}` });
+        continue;
+      }
 
       const data = (await response.json()) as Record<string, unknown>;
       const latest = (data["dist-tags"] as Record<string, string>)?.latest;
+      const hasUpdate = Boolean(latest && pkg.installedVersion && latest !== pkg.installedVersion);
 
       results.push({
         ...pkg,
         latestVersion: latest,
-        hasUpdate: latest && latest !== pkg.installedVersion,
+        hasUpdate,
       });
-    } catch {
-      results.push({ ...pkg, hasUpdate: false });
+    } catch (err) {
+      results.push({ ...pkg, hasUpdate: false, skipReason: (err as Error).message });
     }
   }
 
   return results;
+}
+
+function isPinnedSource(source?: string): boolean {
+  if (!source) return false;
+  if (source.startsWith("npm:")) {
+    const rest = source.slice(4);
+    if (rest.startsWith("@")) {
+      const at = rest.indexOf("@", 1);
+      return at > 0;
+    }
+    return rest.includes("@");
+  }
+  return false;
 }
 
 // ─── AI 语义搜索 ──────────────────────────────────────

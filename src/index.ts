@@ -532,11 +532,14 @@ export default function pluginManager(pi: ExtensionAPI) {
 
   async function updatePackages(pkgName: string, ctx: ExtensionCommandContext) {
     if (pkgName) {
+      const target = findInstalledRefsForPackage(pkgName)[0];
+      const scope = target?.scope === "project" ? "project" : "user";
       showLoading(ctx, `⬆️  ${t("detail.update", locale)} ${pkgName}...`);
-      const result = await runPiInstallAsync(pkgName);
+      const result = await runPiInstallAsync(pkgName, scope);
       clearLoading(ctx);
       if (result.success) {
         ctx.ui.notify(`✅ ${pkgName} ${t("update.success", locale)}\nRun /reload or restart Pi to activate updated resources.`, "info");
+        clearCatalogCache();
       } else {
         ctx.ui.notify(`❌ ${t("install.fail", locale)}: ${result.output}`, "error");
       }
@@ -550,44 +553,90 @@ export default function pluginManager(pi: ExtensionAPI) {
     clearLoading(ctx);
 
     const withUpdates = updates.filter((p) => p.hasUpdate);
+    const skipped = updates.filter((p) => !p.hasUpdate && (p.pinned || p.skipReason));
 
     if (withUpdates.length === 0) {
-      ctx.ui.notify(`✅ ${t("update.all_latest", locale)}`, "info");
+      const skippedLines = skipped.map((p) => `• ${p.name} — ${p.skipReason || "skipped"}`);
+      const message = [t("update.all_latest", locale)];
+      if (skippedLines.length) {
+        message.push("", "Skipped:", ...skippedLines);
+      }
+      ctx.ui.notify(`✅ ${message.join("\n")}`, "info");
       return;
     }
 
-    const items = withUpdates.map(
-      (p, i) => {
-        const line = `${p.name}: ${p.installedVersion} → ${p.latestVersion}`;
-        return i > 0 ? ["", line] : [line];
-      }
-    ).flat();
+    const items: string[] = [];
+    items.push(`⬆️  Update all (${withUpdates.length})`);
+
+    withUpdates.forEach((pkg) => {
+      items.push("");
+      const meta = formatMeta(pkg);
+      items.push(`${pkg.name}: ${pkg.installedVersion} → ${pkg.latestVersion}${meta}`);
+    });
+
+    if (skipped.length) {
+      items.push("");
+      items.push(`Skipped (${skipped.length})`);
+      skipped.forEach((pkg) => {
+        items.push("");
+        items.push(`• ${pkg.name}${formatMeta(pkg)} — ${pkg.skipReason || "skipped"}`);
+      });
+    }
 
     const selected = await ctx.ui.select(
       `${t("update.available", locale)} (${withUpdates.length})`,
-      items
+      items,
     );
 
     if (!selected) return;
 
-    const nonEmpty = items.filter(it => it !== "");
-    const idx = nonEmpty.indexOf(selected);
-    if (idx >= 0) {
-      const target = withUpdates[idx];
+    if (selected.startsWith("⬆️  Update all")) {
       const confirmed = await ctx.ui.confirm(
-        t("detail.update", locale),
-        `${target.name}: ${target.installedVersion} → ${target.latestVersion}`
+        "Update all",
+        `Run pi install for ${withUpdates.length} package(s)?`,
       );
-      if (confirmed) {
+      if (!confirmed) return;
+
+      let succeeded = 0;
+      const failures: string[] = [];
+      for (const target of withUpdates) {
         showLoading(ctx, `⬆️  ${t("detail.update", locale)} ${target.name}...`);
-        const result = await runPiInstallAsync(target.name);
-        clearLoading(ctx);
-        if (result.success) {
-          ctx.ui.notify(`✅ ${target.name} ${t("update.success", locale)}\nRun /reload or restart Pi to activate updated resources.`, "info");
-        } else {
-          ctx.ui.notify(`❌ ${t("install.fail", locale)}: ${result.output}`, "error");
-        }
+        const scope = target.scope === "project" ? "project" : "user";
+        const result = await runPiInstallAsync(target.name, scope);
+        if (result.success) succeeded += 1;
+        else failures.push(`${target.name}: ${result.output}`);
       }
+      clearLoading(ctx);
+      clearCatalogCache();
+      const summary = [
+        `✅ Updated ${succeeded}/${withUpdates.length} package(s)`,
+        "Run /reload or restart Pi to activate updated resources.",
+      ];
+      if (failures.length) summary.push("", "Failures:", ...failures);
+      ctx.ui.notify(summary.join("\n"), failures.length ? "error" : "info");
+      return;
+    }
+
+    if (selected.startsWith("Skipped") || selected.startsWith("•")) return;
+
+    const target = withUpdates.find((pkg) => selected.startsWith(`${pkg.name}: `));
+    if (!target) return;
+
+    const confirmed = await ctx.ui.confirm(
+      t("detail.update", locale),
+      `${target.name}: ${target.installedVersion} → ${target.latestVersion}`,
+    );
+    if (!confirmed) return;
+
+    showLoading(ctx, `⬆️  ${t("detail.update", locale)} ${target.name}...`);
+    const scope = target.scope === "project" ? "project" : "user";
+    const result = await runPiInstallAsync(target.name, scope);
+    clearLoading(ctx);
+    if (result.success) {
+      ctx.ui.notify(`✅ ${target.name} ${t("update.success", locale)}\nRun /reload or restart Pi to activate updated resources.`, "info");
+      clearCatalogCache();
+    } else {
+      ctx.ui.notify(`❌ ${t("install.fail", locale)}: ${result.output}`, "error");
     }
   }
 
