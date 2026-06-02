@@ -16,6 +16,7 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import {
   getInstalledPackages,
+  getInstalledPackageRefs,
   searchNpmRegistry,
   getPackageDetail,
   checkForUpdates,
@@ -366,7 +367,9 @@ export default function pluginManager(pi: ExtensionAPI) {
     const detail = await getPackageDetail(pkg.name);
 
     clearLoading(ctx);
-    const info = detail || pkg;
+    const info = detail
+      ? { ...pkg, ...detail, downloads: detail.downloads ?? pkg.downloads, searchScore: pkg.searchScore, searchReasons: pkg.searchReasons }
+      : pkg;
 
     const status = info.installed
       ? `✅ ${t("detail.installed", locale)} (v${info.installedVersion || info.version})`
@@ -394,6 +397,8 @@ export default function pluginManager(pi: ExtensionAPI) {
     if (info.author) lines.push(`${t("detail.author", locale)}: ${info.author}`);
     if (info.license) lines.push(`${t("detail.license", locale)}: ${info.license}`);
     if (info.types?.length) lines.push(`${t("detail.types", locale)}: ${info.types.map((tp) => localizeType(tp, locale)).join(", ")}`);
+    lines.push(...formatResourceSummary(info.piManifest));
+    lines.push(...formatSecuritySummary(info));
     if (info.downloads) lines.push(`${t("detail.downloads", locale)}: ${formatNumber(info.downloads)}/mo`);
     if (info.keywords?.length) lines.push(`${t("detail.keywords", locale)}: ${info.keywords.join(", ")}`);
     if (info.npmUrl) lines.push(`npm: ${info.npmUrl}`);
@@ -440,7 +445,7 @@ export default function pluginManager(pi: ExtensionAPI) {
     if (!scopeChoice || scopeChoice === "Cancel") return;
 
     const scope = scopeChoice.includes("Project") ? "project" : "user";
-    const command = scope === "project" ? `pi install -l ${installSource}` : `pi install ${installSource}`;
+    const command = scope === "project" ? `pi install ${installSource} -l` : `pi install ${installSource}`;
     const confirmed = await ctx.ui.confirm(
       t("install.confirm", locale),
       [
@@ -474,10 +479,20 @@ export default function pluginManager(pi: ExtensionAPI) {
     }
     if (!pkgName.trim()) return false;
 
-    const uninstallSource = normalizeInstallSource(pkgName);
+    const installedRefs = findInstalledRefsForPackage(pkgName);
+    const selectedRef = await chooseRemovalTarget(pkgName, installedRefs, ctx);
+    if (!selectedRef) return false;
+
+    const uninstallSource = selectedRef.ref;
+    const command = selectedRef.scope === "project" ? `pi uninstall ${uninstallSource} -l` : `pi uninstall ${uninstallSource}`;
     const confirmed = await ctx.ui.confirm(
       t("remove.confirm", locale),
-      `pi uninstall ${uninstallSource}`
+      [
+        command,
+        "",
+        `Scope: ${selectedRef.scope}`,
+        "This removes the package reference from settings. Installed cache files may remain.",
+      ].join("\n")
     );
 
     if (!confirmed) return false;
@@ -485,11 +500,11 @@ export default function pluginManager(pi: ExtensionAPI) {
     showLoading(ctx, `🗑️  ${t("remove.running", locale)} ${pkgName}...`);
 
     // 用异步子进程执行，避免 execSync 冻结 UI
-    const result = await runPiUninstallAsync(pkgName);
+    const result = await runPiUninstallAsync(uninstallSource, selectedRef.scope);
 
     if (result.success) {
       clearLoading(ctx);
-      ctx.ui.notify(`✅ ${pkgName} ${t("remove.success", locale)}`, "info");
+      ctx.ui.notify(`✅ ${pkgName} ${t("remove.success", locale)}\nRun /reload or restart Pi to unload removed resources.`, "info");
       clearCatalogCache();
       return true;
     }
@@ -620,6 +635,81 @@ export default function pluginManager(pi: ExtensionAPI) {
 }
 
 // ─── Helpers ─────────────────────────────────────────────
+
+type InstalledRef = { ref: string; scope: "user" | "project" };
+
+function findInstalledRefsForPackage(pkgName: string): InstalledRef[] {
+  const normalized = normalizeInstallSource(pkgName);
+  const npmName = normalized.startsWith("npm:") ? normalized.slice(4) : null;
+  return getInstalledPackageRefs().filter(({ ref }) => {
+    if (ref === normalized || ref === pkgName) return true;
+    return Boolean(npmName && ref === `npm:${npmName}`);
+  });
+}
+
+async function chooseRemovalTarget(
+  pkgName: string,
+  refs: InstalledRef[],
+  ctx: ExtensionCommandContext,
+): Promise<InstalledRef | null> {
+  if (refs.length === 1) return refs[0];
+
+  const fallback = { ref: normalizeInstallSource(pkgName), scope: "user" as const };
+  if (refs.length === 0) {
+    const proceed = await ctx.ui.confirm(
+      "Remove package",
+      `Package source was not found in settings. Try global removal anyway?\n\npi uninstall ${fallback.ref}`,
+    );
+    return proceed ? fallback : null;
+  }
+
+  const options = refs.flatMap((item, index) => {
+    const label = `${item.scope === "project" ? "📁 Project" : "🌍 Global"} — ${item.ref}`;
+    return index === 0 ? [label] : ["", label];
+  });
+  options.push("", "Cancel");
+
+  const selected = await ctx.ui.select("Remove from which scope?", options);
+  if (!selected || selected === "Cancel") return null;
+
+  const nonEmpty = options.filter((item) => item !== "" && item !== "Cancel");
+  const idx = nonEmpty.indexOf(selected);
+  return idx >= 0 ? refs[idx] : null;
+}
+
+function formatResourceSummary(piManifest?: Record<string, unknown>): string[] {
+  if (!piManifest || Object.keys(piManifest).length === 0) return [];
+
+  const lines = ["", "Resources:"];
+  const resources = [
+    ["extensions", "Extensions"],
+    ["skills", "Skills"],
+    ["prompts", "Prompts"],
+    ["themes", "Themes"],
+  ] as const;
+
+  for (const [key, label] of resources) {
+    const value = piManifest[key];
+    const count = Array.isArray(value) ? value.length : value ? 1 : 0;
+    if (count > 0) lines.push(`  ${label}: ${count}`);
+  }
+
+  return lines.length > 2 ? lines : [];
+}
+
+function formatSecuritySummary(pkg: PackageInfo): string[] {
+  const lines = ["", "Security:"];
+  if (pkg.sourceType === "npm") lines.push("  Source: npm registry");
+  else if (pkg.sourceType === "git") lines.push("  Source: git/remote repository");
+  else if (pkg.sourceType === "local") lines.push("  Source: local path");
+  else lines.push("  Source: unknown");
+
+  if (pkg.source?.match(/@\d+\.\d+\.\d+$/) || pkg.source?.includes("@v")) {
+    lines.push("  Pinned: yes");
+  }
+  lines.push("  Note: Pi packages may run arbitrary code. Review trusted sources before installing.");
+  return lines;
+}
 
 function formatNumber(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;

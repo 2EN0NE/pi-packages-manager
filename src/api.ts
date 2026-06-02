@@ -100,6 +100,10 @@ export function getInstalledPackages(): PackageInfo[] {
   return dedupePackages(results);
 }
 
+export function getInstalledPackageRefs(): PackageRef[] {
+  return readPackageRefs();
+}
+
 export function isPackageInstalled(pkgName: string): boolean {
   const installed = getInstalledPackages();
   return installed.some((p) => p.name === pkgName || `@${pkgName.split("/")[0]}/${pkgName.split("/")[1]}` === p.name);
@@ -404,7 +408,7 @@ export function runPiInstall(pkgName: string): { success: boolean; output: strin
 export async function runPiInstallAsync(pkgName: string, scope: "user" | "project" = "user"): Promise<{ success: boolean; output: string }> {
   const { execFile } = await import("node:child_process");
   const source = normalizeInstallSource(pkgName);
-  const args = scope === "project" ? ["install", "-l", source] : ["install", source];
+  const args = scope === "project" ? ["install", source, "-l"] : ["install", source];
   return new Promise((resolve) => {
     execFile("pi", args, {
       encoding: "utf-8",
@@ -436,11 +440,12 @@ export function runPiUninstall(pkgName: string): { success: boolean; output: str
 }
 
 /** 异步版卸载，不会冻结 UI 事件循环 */
-export async function runPiUninstallAsync(pkgName: string): Promise<{ success: boolean; output: string }> {
+export async function runPiUninstallAsync(pkgName: string, scope?: "user" | "project"): Promise<{ success: boolean; output: string }> {
   const { execFile } = await import("node:child_process");
   const source = normalizeInstallSource(pkgName);
+  const args = scope === "project" ? ["uninstall", source, "-l"] : ["uninstall", source];
   return new Promise((resolve) => {
-    execFile("pi", ["uninstall", source], {
+    execFile("pi", args, {
       encoding: "utf-8",
       timeout: 60_000,
       maxBuffer: 1024 * 1024,
@@ -599,7 +604,7 @@ function readSettings(settingsFile = SETTINGS_FILE): Record<string, unknown> {
   }
 }
 
-type PackageRef = { ref: string; scope: "user" | "project" };
+export type PackageRef = { ref: string; scope: "user" | "project" };
 
 function readPackageRefs(): PackageRef[] {
   const refs: PackageRef[] = [];
