@@ -35,6 +35,7 @@ import {
   localizeType,
   t,
 } from "./i18n";
+import { showPackagesPanel } from "./ui/panel";
 
 const PAGE_SIZE = 8;
 
@@ -53,6 +54,8 @@ export default function pluginManager(pi: ExtensionAPI) {
         { value: "info", label: t("completion.info", locale) },
         { value: "settings", label: "settings: view installed package sources" },
         { value: "refresh", label: "Refresh package catalog" },
+        { value: "panel", label: "Open Claude-style overlay panel" },
+        { value: "legacy", label: "Open the classic select menu" },
       ];
       const filtered = subcommands.filter((s) => s.value.startsWith(prefix));
       return filtered.length > 0 ? filtered : null;
@@ -62,12 +65,9 @@ export default function pluginManager(pi: ExtensionAPI) {
       const sub = parts[0];
       const rest = parts.slice(1).join(" ");
 
-      // 无子命令 → 进入主菜单循环（Esc 在主菜单上才退出）
+      // 无子命令 → 默认进入 overlay 面板（Phase 3）。多次开关交互都在 panelLoop 里进行。
       if (!sub) {
-        let exit = false;
-        while (!exit) {
-          exit = await showMainMenu(ctx);
-        }
+        await panelLoop(ctx);
         return;
       }
 
@@ -97,6 +97,16 @@ export default function pluginManager(pi: ExtensionAPI) {
         case "refresh":
           await refreshCatalog(ctx);
           break;
+        case "panel":
+          await panelLoop(ctx);
+          break;
+        case "legacy": {
+          let exit = false;
+          while (!exit) {
+            exit = await showMainMenu(ctx);
+          }
+          break;
+        }
         default:
           ctx.ui.notify(
             `${t("plugin.unknown", locale)}: ${sub}\n${t("plugin.available", locale)}: list, search, install, remove, update, info`,
@@ -123,6 +133,34 @@ export default function pluginManager(pi: ExtensionAPI) {
   function clearLoading(ctx: ExtensionCommandContext) {
     ctx.ui.setWidget(LOADING_KEY, undefined);
     ctx.ui.setStatus("packages-list", undefined);
+  }
+
+  // ─── Overlay 面板（Phase 3）────────────────────────────────
+
+  /**
+   * 面板主循环。overlay 交互后会返回要执行的动作（详情/搜索/...），动作完成后重新打开面板。
+   */
+  async function panelLoop(ctx: ExtensionCommandContext) {
+    while (true) {
+      const result = await showPackagesPanel(ctx, locale);
+      if (!result) return;
+
+      if (result.action === "detail") {
+        await showPackageDetail(result.pkg, ctx);
+        continue;
+      }
+      if (result.action === "browse-search") {
+        await browseCommunity(ctx);
+        continue;
+      }
+      if (result.action === "settings-config") {
+        ctx.ui.notify(
+          "Run `pi config` in your terminal to enable or disable extensions, skills, prompts, and themes.",
+          "info",
+        );
+        continue;
+      }
+    }
   }
 
   // ─── 主菜单 ─────────────────────────────────────────
