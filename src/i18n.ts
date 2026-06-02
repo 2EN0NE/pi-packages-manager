@@ -1,5 +1,5 @@
 /**
- * plugin-manager/i18n.ts
+ * pi-packages-manager/i18n.ts
  *
  * 本地化/翻译层：
  * 1. 检测用户语言环境
@@ -13,7 +13,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 const HOME = process.env.HOME!;
-const DATA_DIR = join(HOME, ".pi/agent/extensions/plugin-manager/data");
+const DATA_DIR = join(HOME, ".pi/agent/extensions/pi-packages-manager/data");
 const TRANSLATIONS_FILE = join(DATA_DIR, "translations.json");
 
 // ─── Locale ─────────────────────────────────────────────

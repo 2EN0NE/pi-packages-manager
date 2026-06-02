@@ -1,11 +1,12 @@
 {
-  "name": "pi-package-manager",
+  "name": "pi-packages-manager",
   "version": "0.1.0",
-  "description": "A Pi package manager extension for browsing, searching, installing, updating, and removing Pi packages.",
+  "description": "A Pi packages manager extension for browsing, searching, installing, updating, and removing Pi packages.",
   "type": "module",
   "keywords": [
     "pi-package",
     "pi",
+    "packages-manager",
     "package-manager",
     "plugin-manager",
     "extension"

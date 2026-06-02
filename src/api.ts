@@ -1,5 +1,5 @@
 /**
- * plugin-manager/api.ts
+ * pi-packages-manager/api.ts
  * 
  * 数据获取层：npm registry 搜索 + 已安装包读取 + AI 语义搜索
  */
@@ -14,7 +14,7 @@ const SETTINGS_FILE = join(HOME, ".pi/agent/settings.json");
 const NPM_DIR = join(HOME, ".pi/agent/npm/node_modules");
 const PROJECT_SETTINGS_FILE = join(process.cwd(), ".pi/settings.json");
 const PROJECT_NPM_DIR = join(process.cwd(), ".pi/npm/node_modules");
-const CACHE_FILE = join(HOME, ".pi/agent/cache/pi-package-manager/catalog.json");
+const CACHE_FILE = join(HOME, ".pi/agent/cache/pi-packages-manager/catalog.json");
 const CATALOG_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
 // ─── Types ───────────────────────────────────────────────

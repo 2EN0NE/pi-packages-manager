@@ -1,16 +1,16 @@
 /**
- * plugin-manager/index.ts
+ * pi-packages-manager/index.ts
  *
- * 🔌 pi 插件管理器
+ * 📦 pi packages 管理器
  *
  * 交互设计（类 Claude Code 风格）：
- *   /plugin             → 主菜单：已安装 / 浏览社区 / 检查更新
- *   /plugin list        → 已安装插件列表
- *   /plugin search      → 浏览社区（分页 + 搜索 + AI 搜索）
- *   /plugin install xxx → 安装插件
- *   /plugin remove xxx  → 卸载插件
- *   /plugin update [x]  → 检查/更新插件
- *   /plugin info xxx    → 查看插件详情
+ *   /packages-list              → 主菜单：已安装 / 浏览社区 / 检查更新
+ *   /packages-list list         → 已安装插件列表
+ *   /packages-list search       → 浏览社区（分页 + 搜索 + AI 搜索）
+ *   /packages-list install xxx  → 安装插件
+ *   /packages-list remove xxx   → 卸载插件
+ *   /packages-list update [x]   → 检查/更新插件
+ *   /packages-list info xxx     → 查看插件详情
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
@@ -41,7 +41,7 @@ const PAGE_SIZE = 8;
 export default function pluginManager(pi: ExtensionAPI) {
   const locale = detectLocale();
 
-  pi.registerCommand("plugin", {
+  pi.registerCommand("packages-list", {
     description: t("command.description", locale),
     getArgumentCompletions: (prefix: string) => {
       const subcommands = [
@@ -51,6 +51,7 @@ export default function pluginManager(pi: ExtensionAPI) {
         { value: "remove", label: t("completion.remove", locale) },
         { value: "update", label: t("completion.update", locale) },
         { value: "info", label: t("completion.info", locale) },
+        { value: "settings", label: "settings: view installed package sources" },
         { value: "refresh", label: "Refresh package catalog" },
       ];
       const filtered = subcommands.filter((s) => s.value.startsWith(prefix));
@@ -90,6 +91,9 @@ export default function pluginManager(pi: ExtensionAPI) {
         case "info":
           await showPackageInfo(rest, ctx);
           break;
+        case "settings":
+          await showSettings(ctx);
+          break;
         case "refresh":
           await refreshCatalog(ctx);
           break;
@@ -104,21 +108,21 @@ export default function pluginManager(pi: ExtensionAPI) {
 
   // ─── 加载提示 ────────────────────────────────────────
 
-  const LOADING_KEY = "plugin-manager-loading";
+  const LOADING_KEY = "pi-packages-manager-loading";
 
   function showLoading(ctx: ExtensionCommandContext, message: string) {
     ctx.ui.setWidget(LOADING_KEY, [`  ⠋ ${message}`, ""]);
-    ctx.ui.setStatus("plugin", message);
+    ctx.ui.setStatus("packages-list", message);
   }
 
   function updateLoading(ctx: ExtensionCommandContext, message: string) {
     ctx.ui.setWidget(LOADING_KEY, [`  ⠋ ${message}`, ""]);
-    ctx.ui.setStatus("plugin", message);
+    ctx.ui.setStatus("packages-list", message);
   }
 
   function clearLoading(ctx: ExtensionCommandContext) {
     ctx.ui.setWidget(LOADING_KEY, undefined);
-    ctx.ui.setStatus("plugin", undefined);
+    ctx.ui.setStatus("packages-list", undefined);
   }
 
   // ─── 主菜单 ─────────────────────────────────────────
@@ -138,6 +142,8 @@ export default function pluginManager(pi: ExtensionAPI) {
       "",
       `⬆️  ${t("menu.update", locale)}`,
       "",
+      `⚙️  Settings`,
+      "",
       `🔄 Refresh catalog`,
     ];
 
@@ -153,6 +159,8 @@ export default function pluginManager(pi: ExtensionAPI) {
       await browseCommunity(ctx, "");
     } else if (choice.includes(t("menu.update", locale))) {
       await updatePackages("", ctx);
+    } else if (choice.includes("Settings")) {
+      await showSettings(ctx);
     } else if (choice.includes("Refresh catalog")) {
       await refreshCatalog(ctx);
     }
@@ -661,6 +669,94 @@ export default function pluginManager(pi: ExtensionAPI) {
     }
   }
 
+  // ─── 设置 ───────────────────────────────────────
+
+  async function showSettings(ctx: ExtensionCommandContext) {
+    while (true) {
+      const refs = getInstalledPackageRefs();
+      const installed = getInstalledPackages();
+      const installedByName = new Map(installed.map((p) => [p.name, p]));
+
+      const userRefs = refs.filter((r) => r.scope === "user");
+      const projectRefs = refs.filter((r) => r.scope === "project");
+
+      const items: string[] = [];
+      const entries: Array<{ ref: typeof refs[number]; pkg: PackageInfo | undefined }> = [];
+
+      const pushGroup = (title: string, group: typeof refs) => {
+        if (group.length === 0) return;
+        if (items.length > 0) items.push("");
+        items.push(title);
+        group.forEach((ref) => {
+          const pkg = installedByName.get(refToName(ref.ref));
+          const pinned = isPinned(ref.ref) ? " 🔒" : "";
+          const sourceType = pkg?.sourceType || sourceTypeOf(ref.ref);
+          const types = pkg?.types?.length ? ` [${pkg.types.join(", ")}]` : "";
+          const version = pkg?.installedVersion ? `  v${pkg.installedVersion}` : "";
+          items.push("");
+          items.push(`• ${ref.ref}${pinned}${version}${types}  — ${sourceType}`);
+          entries.push({ ref, pkg });
+        });
+      };
+
+      pushGroup(`🌍 Global  (${userRefs.length})`, userRefs);
+      pushGroup(`📁 Project  (${projectRefs.length})`, projectRefs);
+
+      if (refs.length === 0) {
+        items.push("No packages found in user or project settings.");
+      }
+
+      items.push("");
+      items.push("——————————————————————————————");
+      items.push("");
+      items.push("🛠  Configure resources (run pi config in terminal)");
+      items.push("");
+      items.push("🔄 Refresh catalog");
+      items.push("");
+      items.push("↩️  Back");
+
+      const subtitle = [
+        `Global settings: ~/.pi/agent/settings.json`,
+        `Project settings: ${process.cwd()}/.pi/settings.json`,
+      ].join("\n");
+      const selected = await ctx.ui.select(`Settings\n${subtitle}`, items);
+      if (!selected || selected.includes("Back")) return;
+
+      if (selected.includes("Configure resources")) {
+        ctx.ui.notify(
+          [
+            "Run `pi config` in your terminal to enable or disable extensions, skills, prompts, and themes.",
+            "This launches Pi's interactive resource configurator.",
+          ].join("\n"),
+          "info",
+        );
+        continue;
+      }
+
+      if (selected.includes("Refresh catalog")) {
+        await refreshCatalog(ctx);
+        continue;
+      }
+
+      const matchedEntry = entries.find((e) => selected.startsWith(`• ${e.ref.ref}`));
+      if (!matchedEntry) continue;
+
+      const pkg = matchedEntry.pkg;
+      if (pkg) {
+        await showPackageDetail(pkg, ctx);
+      } else {
+        const proceed = await ctx.ui.confirm(
+          "Remove broken package",
+          `Package ${matchedEntry.ref.ref} is in settings but not installed on disk.\nRemove it from settings?`,
+        );
+        if (proceed) {
+          const removed = removeFromSettings(matchedEntry.ref.ref);
+          ctx.ui.notify(removed ? `✅ Removed ${matchedEntry.ref.ref} from settings.` : `❌ Could not remove ${matchedEntry.ref.ref}.`, removed ? "info" : "error");
+        }
+      }
+    }
+  }
+
   // ─── 查看详情 ───────────────────────────────────────
 
   async function showPackageInfo(pkgName: string, ctx: ExtensionCommandContext) {
@@ -686,6 +782,42 @@ export default function pluginManager(pi: ExtensionAPI) {
 // ─── Helpers ─────────────────────────────────────────────
 
 type InstalledRef = { ref: string; scope: "user" | "project" };
+
+function refToName(ref: string): string {
+  if (ref.startsWith("npm:")) {
+    const rest = ref.slice(4);
+    if (rest.startsWith("@")) {
+      const at = rest.indexOf("@", 1);
+      return at > 0 ? rest.slice(0, at) : rest;
+    }
+    return rest.includes("@") ? rest.slice(0, rest.indexOf("@")) : rest;
+  }
+  if (ref.startsWith("git:") || /^(https?:\/\/|ssh:\/\/)/.test(ref)) {
+    const stripped = ref.replace(/^git:/, "").replace(/^(https?:\/\/|ssh:\/\/)/, "");
+    return stripped.split("@")[0];
+  }
+  return ref;
+}
+
+function isPinned(ref: string): boolean {
+  if (ref.startsWith("npm:")) {
+    const rest = ref.slice(4);
+    if (rest.startsWith("@")) return rest.indexOf("@", 1) > 0;
+    return rest.includes("@");
+  }
+  if (ref.startsWith("git:") || /^(https?:\/\/|ssh:\/\/)/.test(ref)) {
+    const stripped = ref.replace(/^git:/, "").replace(/^(https?:\/\/|ssh:\/\/)/, "");
+    return stripped.includes("@");
+  }
+  return false;
+}
+
+function sourceTypeOf(ref: string): string {
+  if (ref.startsWith("npm:")) return "npm";
+  if (ref.startsWith("git:") || /^(https?:\/\/|ssh:\/\/)/.test(ref)) return "git";
+  if (ref.startsWith("file:") || ref.startsWith("./") || ref.startsWith("../") || ref.startsWith("/")) return "local";
+  return "unknown";
+}
 
 function findInstalledRefsForPackage(pkgName: string): InstalledRef[] {
   const normalized = normalizeInstallSource(pkgName);
