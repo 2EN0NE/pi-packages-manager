@@ -3,7 +3,7 @@
 Pi 插件管理器扩展。在 Pi 内浏览、搜索、安装、更新、卸载 Pi 包，灵感来自
 Claude Code 的包管理体验。
 
-[English](README.md) · [简体中文](README.zh-CN.md)
+[English](README.md) · [简体中文](README.zh-CN.md) · [Pi Discussion](https://github.com/earendil-works/pi/discussions/5322) · [npm](https://www.npmjs.com/package/pi-packages-manager)
 
 ![status](https://img.shields.io/badge/status-1.0.0-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
@@ -23,7 +23,7 @@ Claude Code 的包管理体验。
 
 ## 安装
 
-### 从 npm 安装（发布后）
+### 从 npm 安装
 
 ```bash
 pi install npm:pi-packages-manager
