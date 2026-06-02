@@ -38,6 +38,7 @@ import {
 } from "./i18n";
 import { loadStoredLocale, saveLocale } from "./locale";
 import { showPackagesPanel } from "./ui/panel";
+import { auditPackage, RISK_BADGE, type AuditReport, type RiskLevel } from "./security";
 
 const PAGE_SIZE = 8;
 
@@ -506,15 +507,61 @@ export default function pluginManager(pi: ExtensionAPI) {
 
     const scope = scopeChoice.includes("Project") ? "project" : "user";
     const command = scope === "project" ? `pi install ${installSource} -l` : `pi install ${installSource}`;
-    const confirmed = await ctx.ui.confirm(
-      t("install.confirm", locale),
-      [
-        command,
-        "",
-        "Security: Pi packages may run arbitrary code on your machine.",
-        "Only install packages from sources you trust.",
-      ].join("\n")
-    );
+
+    // ── Security audit (pre-install gate) ───────────────
+    // Run a static audit (metadata + source scan) before asking for confirmation.
+    // auditPackage() is fail-safe: errors are captured in the report, never thrown.
+    showLoading(ctx, `🔍 Auditing ${pkgName}…`);
+    let audit: AuditReport;
+    try {
+      audit = await auditPackage(pkgName, { deepScan: true });
+    } catch (err) {
+      // Should not happen (auditPackage is fail-safe), but be defensive.
+      audit = {
+        packageName: pkgName,
+        version: "unknown",
+        overallRisk: "unknown",
+        metadata: { types: [], dependencyCount: 0, peerDependencyCount: 0, isInsecure: false, version: "unknown" },
+        findings: [],
+        summary: `Audit unavailable: ${err instanceof Error ? err.message : String(err)}`,
+        detailLines: [`Audit unavailable: ${err instanceof Error ? err.message : String(err)}`],
+        deepScanned: false,
+        errors: [String(err)],
+      };
+    }
+    clearLoading(ctx);
+
+    const auditBlock = [
+      "Security audit:",
+      ...audit.detailLines.map((l) => `  ${l}`),
+    ];
+    const baseConfirmBody = [
+      command,
+      "",
+      ...auditBlock,
+      "",
+      "Pi packages may run arbitrary code on your machine.",
+      "Only install packages from sources you trust.",
+    ].join("\n");
+
+    // High-risk packages require a stronger "I really mean it" confirmation
+    // beyond the regular yes/no — a select with the dangerous option explicitly named.
+    let confirmed = false;
+    if (audit.overallRisk === "high" || audit.overallRisk === "critical") {
+      const dangerChoice = await ctx.ui.select(
+        `⚠️ ${audit.overallRisk.toUpperCase()}-risk package — review before installing`,
+        [
+          "🚫 Cancel installation (recommended)",
+          `⚠️ Install anyway — ${audit.findings.length} risky pattern(s) detected`,
+        ]
+      );
+      confirmed = dangerChoice?.includes("Install anyway") ?? false;
+    } else {
+      confirmed = await ctx.ui.confirm(
+        t("install.confirm", locale),
+        baseConfirmBody,
+      );
+    }
 
     if (!confirmed) return;
 
@@ -524,7 +571,11 @@ export default function pluginManager(pi: ExtensionAPI) {
 
     clearLoading(ctx);
     if (result.success) {
-      ctx.ui.notify(`✅ ${pkgName} ${t("install.success", locale)}\nRun /reload or restart Pi to activate new resources.`, "info");
+      const riskTag = RISK_BADGE[audit.overallRisk];
+      ctx.ui.notify(
+        `✅ ${pkgName} ${t("install.success", locale)}\nAudit: ${riskTag}\nRun /reload or restart Pi to activate new resources.`,
+        audit.overallRisk === "high" || audit.overallRisk === "critical" ? "warning" : "info",
+      );
       clearCatalogCache();
     } else {
       ctx.ui.notify(`❌ ${t("install.fail", locale)}: ${result.output}`, "error");

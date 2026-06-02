@@ -21,6 +21,10 @@ Pi packages without leaving Pi. Inspired by the Claude Code package UX.
 - ⬆️ Update all with skip detection for pinned, git and local sources
 - 🛡️ Detail page surfacing extensions, skills, prompts, themes, source type
   and trust warnings
+- 🔒 **Pre-install security audit**: every install runs a static analysis
+  pass (metadata + source-code keyword scan) and surfaces a 4-tier risk
+  badge. `high` / `critical` packages require a stronger "Install anyway"
+  confirmation.
 - 🧭 Subcommands for power users: `list`, `search`, `install`, `remove`,
   `update`, `info`, `settings`, `refresh`, `panel`, `legacy`
 
@@ -50,6 +54,36 @@ After install, reload Pi:
 ```text
 /reload
 ```
+
+## Security audit
+
+Every `install` (and `update`) runs a two-layer static audit before the
+final confirmation:
+
+1. **Metadata** via `npm view`: dependency count, peer count, file count,
+   unpacked size, npm `flags.insecure`, last-published date, declared
+   resource types.
+2. **Source code keyword scan** via `npm pack` + `tar` + grep against 15
+   known-dangerous patterns (`rm -rf`, `rimraf`, `fs.unlink`, `eval`,
+   `Function()`, `execSync`, `spawn`, `child_process`, `process.env`,
+   `chmod`, ...). Files larger than 1.5 MB are skipped to keep audits
+   snappy; `node_modules`, `test/`, `coverage/` are ignored.
+
+Findings are aggregated into a 4-tier risk:
+
+| Badge | Meaning | UX |
+| --- | --- | --- |
+| 🟢 safe | No findings in deep scan | Plain confirm with summary |
+| 🟢 low / 🟡 medium | Only low/medium findings, or 3+ medium | Plain confirm with summary |
+| 🟠 high | Any `high` finding, or high finding inside an extension | Two-step select — must pick "Install anyway" |
+| 🔴 critical | Any `critical` finding | Two-step select — must pick "Install anyway" |
+
+The audit is fail-safe: if `npm view` or `npm pack` fails (network,
+timeout, etc.), the install is **not** blocked, but the failure is shown
+in the confirm dialog so the user can decide.
+
+Credits: the audit module is adapted from
+[pi-marketplace](https://github.com/507/pi-marketplace).
 
 ## Usage
 

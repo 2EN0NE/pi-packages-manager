@@ -18,6 +18,9 @@ Claude Code 的包管理体验。
 - ⬇️ 安装 / 卸载 / 更新流程支持作用域选择（全局 / 项目）、安全确认、reload 提示
 - ⬆️ Update all 一键更新所有包，自动跳过 pinned / git / local 来源
 - 🛡️ 详情页展示 extension / skill / prompt / theme 资源以及来源类型与信任警告
+- 🔒 **安装前安全审计**：每次安装都先跑静态分析（metadata + 源码关键词扫描），
+  展示 4 档风险徽章。`high` / `critical` 级别的包需要二次确认（必须选
+  “仍要安装”才能继续）。
 - 🧭 子命令完整：`list`、`search`、`install`、`remove`、`update`、`info`、
   `settings`、`refresh`、`panel`、`legacy`
 
@@ -47,6 +50,32 @@ pi install /path/to/pi-packages-manager
 ```text
 /reload
 ```
+
+## 安全审计
+
+每次 `install`（和 `update`）都会在确认前跑两层静态检查：
+
+1. **元数据层**：`npm view` 获取依赖数、peer 数、文件数、解压体积、
+   `flags.insecure` 标记、最后发布时间、声明的资源类型。
+2. **源码关键词扫描**：`npm pack` + `tar` + grep，检查 15 个已知危险模式
+   （`rm -rf`、`rimraf`、`fs.unlink`、`eval`、`Function()`、`execSync`、
+   `spawn`、`child_process`、`process.env`、`chmod` 等）。大于 1.5 MB 的
+   文件跳过以保持响应速度；`node_modules`、`test/`、`coverage/` 目录
+   忽略。
+
+综合评估为 4 档风险：
+
+| 徽章 | 含义 | UX |
+| --- | --- | --- |
+| 🟢 safe | 深度扫描无发现 | 常规 confirm + 摘要 |
+| 🟢 low / 🟡 medium | 仅有 low/medium 发现，或 3+ 个 medium | 常规 confirm + 摘要 |
+| 🟠 high | 任何 high 发现，或在 extension 内的高危模式 | 两步选择 — 需选 “仍要安装” |
+| 🔴 critical | 任何 critical 发现 | 两步选择 — 需选 “仍要安装” |
+
+审计是**失败安全**的：`npm view` 或 `npm pack` 出错（网络、超时等）不会
+阻塞安装，但会在 confirm 框里显示失败信息，由用户决定。
+
+致谢：审计模块改编自 [pi-marketplace](https://github.com/507/pi-marketplace)。
 
 ## 使用
 
