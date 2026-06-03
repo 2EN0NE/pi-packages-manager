@@ -41,6 +41,7 @@
     "@earendil-works/pi-tui": "*"
   },
   "scripts": {
+    "test": "node --test --experimental-strip-types tests/*.test.mjs",
     "test:load": "pi -e ./src/index.ts --version",
     "pack:dry": "npm pack --dry-run"
   }
