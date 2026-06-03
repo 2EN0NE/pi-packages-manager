@@ -80,6 +80,11 @@ export class PackageList {
     return this.items[this.selected];
   }
 
+  /** True if the selection is on the very first item (or list is empty). */
+  isAtTop(): boolean {
+    return this.items.length === 0 || this.selected === 0;
+  }
+
   invalidate(): void {
     this.cachedWidth = undefined;
     this.cachedLines = undefined;

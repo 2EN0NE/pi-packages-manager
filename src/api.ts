@@ -4,9 +4,9 @@
  * 数据获取层：npm registry 搜索 + 已安装包读取 + AI 语义搜索
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, promises as fsp } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { execFileSync, execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { userInfo } from "node:os";
 import { rankPackages, parsePackageQuery, type Scope, type SourceType } from "./search";
 
@@ -107,7 +107,15 @@ export function getInstalledPackageRefs(): PackageRef[] {
 
 export function isPackageInstalled(pkgName: string): boolean {
   const installed = getInstalledPackages();
-  return installed.some((p) => p.name === pkgName || `@${pkgName.split("/")[0]}/${pkgName.split("/")[1]}` === p.name);
+  return installed.some((p) => {
+    if (p.name === pkgName) return true;
+    // Handle scoped packages: @scope/name
+    if (pkgName.includes("/")) {
+      const parts = pkgName.split("/");
+      return p.name === `@${parts[0]}/${parts[1]}`;
+    }
+    return false;
+  });
 }
 
 // ─── 社区目录预取 ──────────────────────────────────────
@@ -115,8 +123,29 @@ export function isPackageInstalled(pkgName: string): boolean {
 /** 内存缓存，session 内复用 */
 let catalogCache: PackageInfo[] | null = null;
 
+/** Short-lived cache for installed packages (invalidated on install/uninstall). */
+let installedPackagesCache: PackageInfo[] | null = null;
+let installedPackagesCacheTime = 0;
+const INSTALLED_CACHE_TTL_MS = 5_000; // 5 seconds
+
+function getInstalledPackagesCached(): PackageInfo[] {
+  const now = Date.now();
+  if (installedPackagesCache && now - installedPackagesCacheTime < INSTALLED_CACHE_TTL_MS) {
+    return installedPackagesCache;
+  }
+  installedPackagesCache = getInstalledPackages();
+  installedPackagesCacheTime = now;
+  return installedPackagesCache;
+}
+
+function invalidateInstalledCache(): void {
+  installedPackagesCache = null;
+  installedPackagesCacheTime = 0;
+}
+
 export function clearCatalogCache(): void {
   catalogCache = null;
+  invalidateInstalledCache();
   try {
     writeFileSync(CACHE_FILE, JSON.stringify({ fetchedAt: 0, packages: [] }, null, 2), "utf-8");
   } catch {
@@ -146,20 +175,20 @@ export async function fetchFullCatalog(size = 250, forceRefresh = false): Promis
     "pi-coding-agent",
   ];
 
+  // Parallelize all registry queries for faster first load
+  const batchResults = await Promise.allSettled(
+    queries.map((q) => rawNpmSearch(q, size)),
+  );
+
   const allResults: PackageInfo[] = [];
   const seen = new Set<string>();
-
-  for (const q of queries) {
-    try {
-      const results = await rawNpmSearch(q, size);
-      for (const r of results) {
-        if (!seen.has(r.name)) {
-          seen.add(r.name);
-          allResults.push(r);
-        }
+  for (const result of batchResults) {
+    if (result.status !== "fulfilled") continue;
+    for (const r of result.value) {
+      if (!seen.has(r.name)) {
+        seen.add(r.name);
+        allResults.push(r);
       }
-    } catch {
-      // skip failed queries
     }
   }
 
@@ -180,29 +209,31 @@ export async function searchNpmRegistry(query: string, size = 20): Promise<Packa
   // If local catalog has enough relevant results, avoid extra registry calls.
   if (localResults.length >= Math.min(size, 10)) return localResults;
 
-  const queryVariants = registryQuery
-    ? [
-        `${registryQuery} keywords:pi-package`,
-        `${registryQuery} keywords:pi-extension`,
-        `${registryQuery} keywords:pi-skill`,
-        `${registryQuery} pi-coding-agent`,
-        registryQuery,
-      ]
-    : ["keywords:pi-package", "keywords:pi-extension", "keywords:pi-skill", "pi-coding-agent"];
+  // When no search terms (only filters like type:extension), skip extra registry queries
+  // since fetchFullCatalog already covers the full pi-package corpus.
+  if (!registryQuery) return localResults;
+
+  const queryVariants = [
+    `${registryQuery} keywords:pi-package`,
+    `${registryQuery} keywords:pi-extension`,
+    `${registryQuery} keywords:pi-skill`,
+    registryQuery,
+  ];
+
+  // Parallelize search variants
+  const batchResults = await Promise.allSettled(
+    queryVariants.map((text) => rawNpmSearch(text, size)),
+  );
 
   const allResults = [...localResults];
   const seen = new Set(allResults.map((p) => p.name));
 
-  for (const text of queryVariants) {
-    try {
-      const results = await rawNpmSearch(text, size);
-      for (const pkg of results) {
-        if (seen.has(pkg.name)) continue;
-        seen.add(pkg.name);
-        allResults.push(pkg);
-      }
-    } catch {
-      // continue with other variants
+  for (const result of batchResults) {
+    if (result.status !== "fulfilled") continue;
+    for (const pkg of result.value) {
+      if (seen.has(pkg.name)) continue;
+      seen.add(pkg.name);
+      allResults.push(pkg);
     }
   }
 
@@ -217,7 +248,8 @@ export async function getPackageDetail(pkgName: string): Promise<PackageInfo | n
 
   try {
     const url = `https://registry.npmjs.org/${registryPackagePath(npmName)}`;
-    const response = await fetch(url);
+    const ctrl = fetchTimeout(15_000);
+    const response = await fetch(url, { signal: ctrl.signal });
     if (!response.ok) return null;
 
     const data = (await response.json()) as Record<string, unknown>;
@@ -271,6 +303,8 @@ export async function checkForUpdates(): Promise<UpdateInfo[]> {
   const installed = getInstalledPackages();
   const results: UpdateInfo[] = [];
 
+  // Collect packages that need registry checks
+  const needsCheck: PackageInfo[] = [];
   for (const pkg of installed) {
     if (pkg.sourceType && pkg.sourceType !== "npm") {
       results.push({
@@ -295,33 +329,42 @@ export async function checkForUpdates(): Promise<UpdateInfo[]> {
       continue;
     }
 
-    try {
-      const npmName = normalizeNpmPackageName(pkg.name);
-      if (!npmName) {
-        results.push({ ...pkg, hasUpdate: false, skipReason: "unsupported source" });
-        continue;
-      }
+    const npmName = normalizeNpmPackageName(pkg.name);
+    if (!npmName) {
+      results.push({ ...pkg, hasUpdate: false, skipReason: "unsupported source" });
+      continue;
+    }
 
+    needsCheck.push(pkg);
+  }
+
+  // Check all packages concurrently
+  const checkResults = await Promise.allSettled(
+    needsCheck.map(async (pkg) => {
+      const npmName = normalizeNpmPackageName(pkg.name)!;
       const url = `https://registry.npmjs.org/${registryPackagePath(npmName)}`;
+      const ctrl = fetchTimeout(10_000);
       const response = await fetch(url, {
         headers: { Accept: "application/json" },
+        signal: ctrl.signal,
       });
       if (!response.ok) {
-        results.push({ ...pkg, hasUpdate: false, skipReason: `registry ${response.status}` });
-        continue;
+        return { ...pkg, latestVersion: undefined, hasUpdate: false, skipReason: `registry ${response.status}` } as UpdateInfo;
       }
-
       const data = (await response.json()) as Record<string, unknown>;
       const latest = (data["dist-tags"] as Record<string, string>)?.latest;
       const hasUpdate = Boolean(latest && pkg.installedVersion && latest !== pkg.installedVersion);
+      return { ...pkg, latestVersion: latest, hasUpdate } as UpdateInfo;
+    }),
+  );
 
-      results.push({
-        ...pkg,
-        latestVersion: latest,
-        hasUpdate,
-      });
-    } catch (err) {
-      results.push({ ...pkg, hasUpdate: false, skipReason: (err as Error).message });
+  for (let i = 0; i < checkResults.length; i++) {
+    const result = checkResults[i];
+    if (result.status === "fulfilled") {
+      results.push(result.value);
+    } else {
+      const failedPkg = needsCheck[i];
+      results.push({ ...failedPkg, hasUpdate: false, skipReason: (result.reason as Error)?.message || "check failed" });
     }
   }
 
@@ -370,12 +413,22 @@ export async function aiSemanticSearch(
   ].join("\n");
 
   try {
-    // Pass prompt via stdin ($'...' for bash escaping) to avoid @file path issues
-    const escaped = prompt.replace(/'/g, "'\\''");
-    const output = execSync(
-      `pi -p --no-session $'${escaped}' 2>/dev/null`,
-      { encoding: "utf-8", timeout: 60_000 },
-    );
+    const { execFile } = await import("node:child_process");
+    const output = await new Promise<string>((resolve, reject) => {
+      const proc = execFile("pi", ["-p", "--no-session"], {
+        encoding: "utf-8",
+        timeout: 60_000,
+        maxBuffer: 1024 * 1024,
+      }, (err, stdout, stderr) => {
+        if (err) reject(err);
+        else resolve(stdout || stderr || "");
+      });
+      // Pass prompt via stdin to avoid shell escaping issues
+      if (proc.stdin) {
+        proc.stdin.write(prompt);
+        proc.stdin.end();
+      }
+    });
     const results = parseAiResponse(output, catalog);
     if (results.length > 0) return results;
     // If AI returned nothing parseable, fallback
@@ -439,53 +492,74 @@ function fallbackKeywordSearch(query: string, catalog: PackageInfo[]): PackageIn
 const NPM_CACHE_DIR = join(HOME, ".npm/_cacache");
 
 /**
- * 检测 npm 缓存目录是否存在非当前用户拥有的文件/目录。
- * 这通常是因为之前用 sudo 运行了 npm，导致缓存目录被 root 创建。
- * 返回需要修复的路径数量（0 表示正常）。
+ * 异步版：检测 npm 缓存权限问题。递归遍历 _cacache 但限制深度为 3 层。
+ * 不会阻塞事件循环。
  */
-export function detectNpmCachePermissionIssues(): { count: number; samplePaths: string[] } {
+export async function detectNpmCachePermissionIssuesAsync(): Promise<{ count: number; samplePaths: string[] }> {
   const currentUser = userInfo().username;
   const badPaths: string[] = [];
 
   try {
     if (!existsSync(NPM_CACHE_DIR)) return { count: 0, samplePaths: [] };
-    walkDirForBadOwner(NPM_CACHE_DIR, currentUser, badPaths, 50); // limit depth/samples
+    await walkDirForBadOwner(NPM_CACHE_DIR, badPaths, 50, 0);
   } catch {
-    // If we can't read the cache dir at all, that's also a problem
     return { count: -1, samplePaths: [NPM_CACHE_DIR] };
   }
 
   return { count: badPaths.length, samplePaths: badPaths.slice(0, 5) };
 }
 
-function walkDirForBadOwner(dir: string, expectedOwner: string, results: string[], limit: number): void {
-  if (results.length >= limit) return;
+/**
+ * 轻量级同步检查：只检查顶层目录的所有者，不递归。用于快速预检。
+ */
+export function detectNpmCachePermissionIssues(): { count: number; samplePaths: string[] } {
   try {
-    const entries = readdirSync(dir, { withFileTypes: true });
+    if (!existsSync(NPM_CACHE_DIR)) return { count: 0, samplePaths: [] };
+    const stat = statSync(NPM_CACHE_DIR);
+    if (stat.uid === 0) {
+      return { count: 1, samplePaths: [NPM_CACHE_DIR] };
+    }
+    // Also check immediate children (one level only)
+    const entries = readdirSync(NPM_CACHE_DIR, { withFileTypes: true });
+    const badPaths: string[] = [];
+    for (const entry of entries) {
+      if (badPaths.length >= 5) break;
+      try {
+        const fullPath = join(NPM_CACHE_DIR, entry.name);
+        const s = statSync(fullPath);
+        if (s.uid === 0) badPaths.push(fullPath);
+      } catch {
+        // Can't stat — permission issue
+      }
+    }
+    return { count: badPaths.length, samplePaths: badPaths };
+  } catch {
+    return { count: -1, samplePaths: [NPM_CACHE_DIR] };
+  }
+}
+
+async function walkDirForBadOwner(dir: string, results: string[], limit: number, depth: number): Promise<void> {
+  // Depth guard: _cacache can be very deep, limit to 3 levels for performance
+  if (results.length >= limit || depth > 3) return;
+  try {
+    const entries = await fsp.readdir(dir, { withFileTypes: true });
     for (const entry of entries) {
       if (results.length >= limit) return;
       const fullPath = join(dir, entry.name);
       try {
-        const stat = statSync(fullPath);
-        if (stat.uid !== 0 && stat.uid === userInfo().uid) continue; // fast path: same uid
-        // Get the username for the file's owner
-        try {
-          const fileOwner = getUserByUid(stat.uid);
-          if (fileOwner !== expectedOwner) {
-            results.push(fullPath);
-          }
-        } catch {
-          // Can't determine owner — treat as suspicious
-          if (stat.uid !== userInfo().uid) {
-            results.push(fullPath);
-          }
+        const stat = await fsp.stat(fullPath);
+        const currentUid = userInfo().uid;
+        if (stat.uid !== 0 && stat.uid === currentUid) continue; // fast path: same uid
+        // Only flag root-owned files as problematic
+        if (stat.uid === 0) {
+          results.push(fullPath);
         }
       } catch {
         // Can't stat — likely permission issue
         results.push(fullPath);
       }
       if (entry.isDirectory()) {
-        walkDirForBadOwner(fullPath, expectedOwner, results, limit);
+        await walkDirForBadOwner(fullPath, results, limit, depth + 1);
       }
     }
   } catch {
@@ -494,35 +568,31 @@ function walkDirForBadOwner(dir: string, expectedOwner: string, results: string[
   }
 }
 
-function getUserByUid(uid: number): string {
-  // Use a simple heuristic: uid 0 = root, otherwise assume current user
-  // Full implementation would use node:userdb or similar
-  if (uid === 0) return "root";
-  if (uid === userInfo().uid) return userInfo().username;
-  return `uid:${uid}`;
-}
-
 /**
- * 尝试自动修复 npm 缓存权限问题。
- * 使用 chmod/chown 方式修复；如果无权限则返回修复失败的路径。
- * 返回 true 表示成功修复，false 表示需要用户手动修复。
+ * 尝试异步修复 npm 缓存权限问题（npm cache clean）。
+ * 失败时返回可操作的修复建议。
  */
-export function fixNpmCachePermissions(): { fixed: boolean; message: string } {
-  const issues = detectNpmCachePermissionIssues();
+export async function fixNpmCachePermissionsAsync(): Promise<{ fixed: boolean; message: string }> {
+  const issues = await detectNpmCachePermissionIssuesAsync();
   if (issues.count === 0) return { fixed: true, message: "" };
 
   const currentUser = userInfo().username;
   const fixCommand = `sudo chown -R ${currentUser} ~/.npm`;
 
-  // Try to fix by removing the problematic cache entries (npm cache clean style)
-  // This is a softer approach that doesn't require sudo
+  // Try to fix by cleaning the npm cache
   try {
-    execSync(`npm cache clean --force 2>/dev/null`, {
-      encoding: "utf-8",
-      timeout: 30_000,
+    const { execFile } = await import("node:child_process");
+    await new Promise<void>((resolve, reject) => {
+      execFile("npm", ["cache", "clean", "--force"], {
+        encoding: "utf-8",
+        timeout: 30_000,
+      }, (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
     });
     // Re-check
-    const recheck = detectNpmCachePermissionIssues();
+    const recheck = await detectNpmCachePermissionIssuesAsync();
     if (recheck.count === 0) {
       return { fixed: true, message: "npm cache cleaned successfully." };
     }
@@ -546,15 +616,16 @@ export function fixNpmCachePermissions(): { fixed: boolean; message: string } {
 }
 
 /**
- * 在安装/卸载前执行 npm 缓存健康检查。
- * 如果检测到权限问题，自动尝试修复；修复失败则返回诊断信息。
+ * 异步版：在安装/卸载前执行 npm 缓存健康检查。
+ * 先做轻量级同步预检（只看顶层），仅在有疑点时才做异步深度检查。
  */
-export function ensureNpmCacheHealthy(): { ok: boolean; message: string } {
-  const issues = detectNpmCachePermissionIssues();
-  if (issues.count === 0) return { ok: true, message: "" };
+export async function ensureNpmCacheHealthyAsync(): Promise<{ ok: boolean; message: string }> {
+  // Quick synchronous check (top-level only, very fast)
+  const quickCheck = detectNpmCachePermissionIssues();
+  if (quickCheck.count === 0) return { ok: true, message: "" };
 
-  // Auto-fix attempt
-  const fix = fixNpmCachePermissions();
+  // Deeper async check + auto-fix attempt
+  const fix = await fixNpmCachePermissionsAsync();
   if (fix.fixed) return { ok: true, message: fix.message };
 
   return { ok: false, message: fix.message };
@@ -563,6 +634,11 @@ export function ensureNpmCacheHealthy(): { ok: boolean; message: string } {
 // ─── 安装/卸载命令 ──────────────────────────────────────
 
 export function runPiInstall(pkgName: string): { success: boolean; output: string } {
+  // Quick sync pre-flight cache check
+  const quickCheck = detectNpmCachePermissionIssues();
+  if (quickCheck.count > 0) {
+    return { success: false, output: `npm cache permission error: run 'sudo chown -R $(whoami) ~/.npm' in your terminal.` };
+  }
   try {
     const source = normalizeInstallSource(pkgName);
     const output = execFileSync("pi", ["install", source], {
@@ -573,16 +649,20 @@ export function runPiInstall(pkgName: string): { success: boolean; output: strin
     return { success: true, output };
   } catch (err: unknown) {
     const e = err as { stdout?: string; stderr?: string; message?: string };
-    return { success: false, output: e.stderr || e.stdout || e.message || "Install failed" };
+    const rawOutput = e.stderr || e.stdout || e.message || "Install failed";
+    return { success: false, output: enhanceNpmError(rawOutput) };
   }
 }
 
 /** 异步版安装，不会冻结 UI 事件循环 */
 export async function runPiInstallAsync(pkgName: string, scope: "user" | "project" = "user"): Promise<{ success: boolean; output: string }> {
-  // Pre-flight: check npm cache health
-  const cacheCheck = ensureNpmCacheHealthy();
-  if (!cacheCheck.ok) {
-    return { success: false, output: `npm cache permission error:\n${cacheCheck.message}` };
+  // Pre-flight: check npm cache health (lightweight sync check first, async deep check only if needed)
+  const quickCheck = detectNpmCachePermissionIssues();
+  if (quickCheck.count > 0) {
+    const cacheCheck = await ensureNpmCacheHealthyAsync();
+    if (!cacheCheck.ok) {
+      return { success: false, output: `npm cache permission error:\n${cacheCheck.message}` };
+    }
   }
 
   const { execFile } = await import("node:child_process");
@@ -607,6 +687,11 @@ export async function runPiInstallAsync(pkgName: string, scope: "user" | "projec
 }
 
 export function runPiUninstall(pkgName: string): { success: boolean; output: string } {
+  // Quick sync pre-flight cache check
+  const quickCheck = detectNpmCachePermissionIssues();
+  if (quickCheck.count > 0) {
+    return { success: false, output: `npm cache permission error: run 'sudo chown -R $(whoami) ~/.npm' in your terminal.` };
+  }
   try {
     const source = normalizeInstallSource(pkgName);
     const output = execFileSync("pi", ["uninstall", source], {
@@ -617,16 +702,20 @@ export function runPiUninstall(pkgName: string): { success: boolean; output: str
     return { success: true, output };
   } catch (err: unknown) {
     const e = err as { stdout?: string; stderr?: string; message?: string };
-    return { success: false, output: e.stderr || e.stdout || e.message || "Uninstall failed" };
+    const rawOutput = e.stderr || e.stdout || e.message || "Uninstall failed";
+    return { success: false, output: enhanceNpmError(rawOutput) };
   }
 }
 
 /** 异步版卸载，不会冻结 UI 事件循环 */
 export async function runPiUninstallAsync(pkgName: string, scope?: "user" | "project"): Promise<{ success: boolean; output: string }> {
-  // Pre-flight: check npm cache health
-  const cacheCheck = ensureNpmCacheHealthy();
-  if (!cacheCheck.ok) {
-    return { success: false, output: `npm cache permission error:\n${cacheCheck.message}` };
+  // Pre-flight: check npm cache health (lightweight sync check first, async deep check only if needed)
+  const quickCheck = detectNpmCachePermissionIssues();
+  if (quickCheck.count > 0) {
+    const cacheCheck = await ensureNpmCacheHealthyAsync();
+    if (!cacheCheck.ok) {
+      return { success: false, output: `npm cache permission error:\n${cacheCheck.message}` };
+    }
   }
 
   const { execFile } = await import("node:child_process");
@@ -678,6 +767,13 @@ export function removeFromSettings(pkgName: string): boolean {
   return removed;
 }
 
+/** 创建带超时的 fetch AbortController */
+function fetchTimeout(ms: number): AbortController {
+  const ctrl = new AbortController();
+  setTimeout(() => ctrl.abort(), ms);
+  return ctrl;
+}
+
 // ─── npm 搜索内部工具 ──────────────────────────────────
 
 interface NpmSearchResponse {
@@ -698,12 +794,13 @@ interface NpmSearchResponse {
 /** 原始 npm search，不追加 pi-coding-agent */
 async function rawNpmSearch(text: string, size: number): Promise<PackageInfo[]> {
   const url = `https://registry.npmjs.org/-/v1/search?text=${encodeURIComponent(text)}&size=${size}`;
-  const response = await fetch(url);
-  if (!response.ok) return [];
+  const ctrl = fetchTimeout(15_000);
+  const response = await fetch(url, { signal: ctrl.signal }).catch(() => null);
+  if (!response || !response.ok) return [];
 
   const data = await response.json() as NpmSearchResponse;
 
-  const installedPkgs = getInstalledPackages();
+  const installedPkgs = getInstalledPackagesCached();
   const installedNames = new Set(installedPkgs.map((p) => p.name));
 
   return data.objects.map((obj) => mapNpmObject(obj, installedPkgs, installedNames));
@@ -766,7 +863,7 @@ function writeCatalogCache(packages: PackageInfo[]): void {
 }
 
 function mergeInstalledState(packages: PackageInfo[]): PackageInfo[] {
-  const installedPkgs = getInstalledPackages();
+  const installedPkgs = getInstalledPackagesCached();
   const installedByName = new Map(installedPkgs.map((p) => [p.name, p]));
   return packages.map((pkg) => {
     const installed = installedByName.get(pkg.name);
@@ -804,7 +901,7 @@ function enhanceNpmError(rawOutput: string): string {
       "This usually happens when npm was previously run with sudo.",
       "",
       "To fix, run in your terminal:",
-      `  sudo chown -R ${currentUser} ~/.npm",
+      `  sudo chown -R ${currentUser} ~/.npm`,
       "",
       "Or alternatively:",
       "  sudo npm cache clean --force",
