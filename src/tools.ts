@@ -19,6 +19,7 @@ import {
   getPackageDetail,
   fetchFullCatalog,
   normalizeInstallSource,
+  clearCatalogCache,
   type PackageInfo,
 } from "./api";
 import { auditPackage, RISK_BADGE } from "./security";
