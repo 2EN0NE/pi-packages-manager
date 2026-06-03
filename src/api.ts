@@ -4,9 +4,10 @@
  * 数据获取层：npm registry 搜索 + 已安装包读取 + AI 语义搜索
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { execFileSync, execSync } from "node:child_process";
+import { userInfo } from "node:os";
 import { rankPackages, parsePackageQuery, type Scope, type SourceType } from "./search";
 
 const HOME = process.env.HOME!;
@@ -433,6 +434,132 @@ function fallbackKeywordSearch(query: string, catalog: PackageInfo[]): PackageIn
   return scored.map((s) => s.pkg).slice(0, 20);
 }
 
+// ─── npm 缓存权限检测与修复 ──────────────────────────────────
+
+const NPM_CACHE_DIR = join(HOME, ".npm/_cacache");
+
+/**
+ * 检测 npm 缓存目录是否存在非当前用户拥有的文件/目录。
+ * 这通常是因为之前用 sudo 运行了 npm，导致缓存目录被 root 创建。
+ * 返回需要修复的路径数量（0 表示正常）。
+ */
+export function detectNpmCachePermissionIssues(): { count: number; samplePaths: string[] } {
+  const currentUser = userInfo().username;
+  const badPaths: string[] = [];
+
+  try {
+    if (!existsSync(NPM_CACHE_DIR)) return { count: 0, samplePaths: [] };
+    walkDirForBadOwner(NPM_CACHE_DIR, currentUser, badPaths, 50); // limit depth/samples
+  } catch {
+    // If we can't read the cache dir at all, that's also a problem
+    return { count: -1, samplePaths: [NPM_CACHE_DIR] };
+  }
+
+  return { count: badPaths.length, samplePaths: badPaths.slice(0, 5) };
+}
+
+function walkDirForBadOwner(dir: string, expectedOwner: string, results: string[], limit: number): void {
+  if (results.length >= limit) return;
+  try {
+    const entries = readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (results.length >= limit) return;
+      const fullPath = join(dir, entry.name);
+      try {
+        const stat = statSync(fullPath);
+        if (stat.uid !== 0 && stat.uid === userInfo().uid) continue; // fast path: same uid
+        // Get the username for the file's owner
+        try {
+          const fileOwner = getUserByUid(stat.uid);
+          if (fileOwner !== expectedOwner) {
+            results.push(fullPath);
+          }
+        } catch {
+          // Can't determine owner — treat as suspicious
+          if (stat.uid !== userInfo().uid) {
+            results.push(fullPath);
+          }
+        }
+      } catch {
+        // Can't stat — likely permission issue
+        results.push(fullPath);
+      }
+      if (entry.isDirectory()) {
+        walkDirForBadOwner(fullPath, expectedOwner, results, limit);
+      }
+    }
+  } catch {
+    // Can't read directory — permission issue
+    results.push(dir);
+  }
+}
+
+function getUserByUid(uid: number): string {
+  // Use a simple heuristic: uid 0 = root, otherwise assume current user
+  // Full implementation would use node:userdb or similar
+  if (uid === 0) return "root";
+  if (uid === userInfo().uid) return userInfo().username;
+  return `uid:${uid}`;
+}
+
+/**
+ * 尝试自动修复 npm 缓存权限问题。
+ * 使用 chmod/chown 方式修复；如果无权限则返回修复失败的路径。
+ * 返回 true 表示成功修复，false 表示需要用户手动修复。
+ */
+export function fixNpmCachePermissions(): { fixed: boolean; message: string } {
+  const issues = detectNpmCachePermissionIssues();
+  if (issues.count === 0) return { fixed: true, message: "" };
+
+  const currentUser = userInfo().username;
+  const fixCommand = `sudo chown -R ${currentUser} ~/.npm`;
+
+  // Try to fix by removing the problematic cache entries (npm cache clean style)
+  // This is a softer approach that doesn't require sudo
+  try {
+    execSync(`npm cache clean --force 2>/dev/null`, {
+      encoding: "utf-8",
+      timeout: 30_000,
+    });
+    // Re-check
+    const recheck = detectNpmCachePermissionIssues();
+    if (recheck.count === 0) {
+      return { fixed: true, message: "npm cache cleaned successfully." };
+    }
+  } catch {
+    // cache clean also failed due to permissions, fall through
+  }
+
+  return {
+    fixed: false,
+    message: [
+      `npm cache has ${issues.count} file(s)/dir(s) owned by another user (likely root).`,
+      `This causes EACCES errors during install.`,
+      ``,
+      `Fix: run the following command in your terminal:`,
+      `  ${fixCommand}`,
+      ``,
+      `Or clear the cache:`,
+      `  sudo npm cache clean --force`,
+    ].join("\n"),
+  };
+}
+
+/**
+ * 在安装/卸载前执行 npm 缓存健康检查。
+ * 如果检测到权限问题，自动尝试修复；修复失败则返回诊断信息。
+ */
+export function ensureNpmCacheHealthy(): { ok: boolean; message: string } {
+  const issues = detectNpmCachePermissionIssues();
+  if (issues.count === 0) return { ok: true, message: "" };
+
+  // Auto-fix attempt
+  const fix = fixNpmCachePermissions();
+  if (fix.fixed) return { ok: true, message: fix.message };
+
+  return { ok: false, message: fix.message };
+}
+
 // ─── 安装/卸载命令 ──────────────────────────────────────
 
 export function runPiInstall(pkgName: string): { success: boolean; output: string } {
@@ -452,6 +579,12 @@ export function runPiInstall(pkgName: string): { success: boolean; output: strin
 
 /** 异步版安装，不会冻结 UI 事件循环 */
 export async function runPiInstallAsync(pkgName: string, scope: "user" | "project" = "user"): Promise<{ success: boolean; output: string }> {
+  // Pre-flight: check npm cache health
+  const cacheCheck = ensureNpmCacheHealthy();
+  if (!cacheCheck.ok) {
+    return { success: false, output: `npm cache permission error:\n${cacheCheck.message}` };
+  }
+
   const { execFile } = await import("node:child_process");
   const source = normalizeInstallSource(pkgName);
   const args = scope === "project" ? ["install", source, "-l"] : ["install", source];
@@ -462,7 +595,10 @@ export async function runPiInstallAsync(pkgName: string, scope: "user" | "projec
       maxBuffer: 1024 * 1024,
     }, (err, stdout, stderr) => {
       if (err) {
-        resolve({ success: false, output: stderr || stdout || err.message || "Install failed" });
+        const rawOutput = stderr || stdout || err.message || "Install failed";
+        // Enhance EACCES/EEXIST errors with actionable fix
+        const output = enhanceNpmError(rawOutput);
+        resolve({ success: false, output });
       } else {
         resolve({ success: true, output: stdout });
       }
@@ -487,6 +623,12 @@ export function runPiUninstall(pkgName: string): { success: boolean; output: str
 
 /** 异步版卸载，不会冻结 UI 事件循环 */
 export async function runPiUninstallAsync(pkgName: string, scope?: "user" | "project"): Promise<{ success: boolean; output: string }> {
+  // Pre-flight: check npm cache health
+  const cacheCheck = ensureNpmCacheHealthy();
+  if (!cacheCheck.ok) {
+    return { success: false, output: `npm cache permission error:\n${cacheCheck.message}` };
+  }
+
   const { execFile } = await import("node:child_process");
   const source = normalizeInstallSource(pkgName);
   const args = scope === "project" ? ["uninstall", source, "-l"] : ["uninstall", source];
@@ -497,7 +639,9 @@ export async function runPiUninstallAsync(pkgName: string, scope?: "user" | "pro
       maxBuffer: 1024 * 1024,
     }, (err, stdout, stderr) => {
       if (err) {
-        resolve({ success: false, output: stderr || stdout || err.message || "Uninstall failed" });
+        const rawOutput = stderr || stdout || err.message || "Uninstall failed";
+        const output = enhanceNpmError(rawOutput);
+        resolve({ success: false, output });
       } else {
         resolve({ success: true, output: stdout });
       }
@@ -638,6 +782,36 @@ function mergeInstalledState(packages: PackageInfo[]): PackageInfo[] {
       types: installed.types?.length ? installed.types : pkg.types,
     };
   });
+}
+
+// ─── Error Enhancement ──────────────────────────────────
+
+/**
+ * 增强 npm 错误输出，对 EACCES/EEXIST 等权限错误添加可操作的修复建议。
+ */
+function enhanceNpmError(rawOutput: string): string {
+  const isPermissionError = rawOutput.includes("EACCES") || rawOutput.includes("permission denied");
+  const isEexistError = rawOutput.includes("EEXIST") || rawOutput.includes("File exists");
+
+  if (isPermissionError || isEexistError) {
+    const currentUser = userInfo().username;
+    return [
+      rawOutput,
+      "",
+      "━━━ npm Cache Permission Error ━━━",
+      "",
+      "The npm cache contains files/directories owned by another user (likely root).",
+      "This usually happens when npm was previously run with sudo.",
+      "",
+      "To fix, run in your terminal:",
+      `  sudo chown -R ${currentUser} ~/.npm",
+      "",
+      "Or alternatively:",
+      "  sudo npm cache clean --force",
+    ].join("\n");
+  }
+
+  return rawOutput;
 }
 
 // ─── Helpers ─────────────────────────────────────────────
