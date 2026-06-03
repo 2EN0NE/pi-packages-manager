@@ -39,6 +39,7 @@ import {
 import { loadStoredLocale, saveLocale } from "./locale";
 import { showPackagesPanel } from "./ui/panel";
 import { auditPackage, RISK_BADGE, type AuditReport, type RiskLevel } from "./security";
+import { registerTools } from "./tools";
 
 const PAGE_SIZE = 8;
 
@@ -46,6 +47,9 @@ export default function pluginManager(pi: ExtensionAPI) {
   // Apply persisted locale (project > global) before reading any UI strings.
   loadStoredLocale(process.cwd());
   let locale = detectLocale();
+
+  // ── Register Pi tools (natural language triggers) ──
+  registerTools(pi);
 
   pi.registerCommand("packages-list", {
     description: t("command.description", locale),
@@ -423,69 +427,115 @@ export default function pluginManager(pi: ExtensionAPI) {
   // ─── 包详情 ─────────────────────────────────────────
 
   async function showPackageDetail(pkg: PackageInfo, ctx: ExtensionCommandContext) {
-    showLoading(ctx, `📦 ${t("detail.loading", locale)} ${pkg.name}...`);
+    // Loop to allow re-rendering after audit without popping back
+    let lastAudit: AuditReport | null = null;
+    while (true) {
+      showLoading(ctx, `📦 ${t("detail.loading", locale)} ${pkg.name}...`);
 
-    const detail = await getPackageDetail(pkg.name);
+      const detail = await getPackageDetail(pkg.name);
 
-    clearLoading(ctx);
-    const info = detail
-      ? { ...pkg, ...detail, downloads: detail.downloads ?? pkg.downloads, searchScore: pkg.searchScore, searchReasons: pkg.searchReasons }
-      : pkg;
+      clearLoading(ctx);
+      const info = detail
+        ? { ...pkg, ...detail, downloads: detail.downloads ?? pkg.downloads, searchScore: pkg.searchScore, searchReasons: pkg.searchReasons }
+        : pkg;
 
-    const status = info.installed
-      ? `✅ ${t("detail.installed", locale)} (v${info.installedVersion || info.version})`
-      : `⬜ ${t("detail.not_installed", locale)}`;
+      const status = info.installed
+        ? `✅ ${t("detail.installed", locale)} (v${info.installedVersion || info.version})`
+        : `⬜ ${t("detail.not_installed", locale)}`;
 
-    const hasUpdate = info.latestVersion && info.installedVersion && info.latestVersion !== info.installedVersion;
+      const hasUpdate = info.latestVersion && info.installedVersion && info.latestVersion !== info.installedVersion;
 
-    const lines = [
-      `📦 ${info.name}`,
-      ``,
-      `${info.description}`,
-      ``,
-      `${status}`,
-    ];
+      const lines = [
+        `📦 ${info.name}`,
+        ``,
+        `${info.description}`,
+        ``,
+        `${status}`,
+      ];
 
-    if (hasUpdate) {
-      lines.push(`⬆️  ${t("detail.update", locale)}: ${info.installedVersion} → ${info.latestVersion}`);
-    }
+      if (hasUpdate) {
+        lines.push(`⬆️  ${t("detail.update", locale)}: ${info.installedVersion} → ${info.latestVersion}`);
+      }
 
-    if (info.source) lines.push(`source: ${info.source}`);
-    if (info.sourceType || info.scope) lines.push(`scope: ${[info.scope, info.sourceType].filter(Boolean).join(" · ")}`);
-    if (info.searchReasons?.length) lines.push(`match: ${info.searchReasons.join(", ")}`);
-    if (info.version) lines.push(`${t("detail.version", locale)}: ${info.version}`);
-    if (info.latestVersion && !info.installed) lines.push(`${t("detail.latest", locale)}: ${info.latestVersion}`);
-    if (info.author) lines.push(`${t("detail.author", locale)}: ${info.author}`);
-    if (info.license) lines.push(`${t("detail.license", locale)}: ${info.license}`);
-    if (info.types?.length) lines.push(`${t("detail.types", locale)}: ${info.types.map((tp) => localizeType(tp, locale)).join(", ")}`);
-    lines.push(...formatResourceSummary(info.piManifest));
-    lines.push(...formatSecuritySummary(info));
-    if (info.downloads) lines.push(`${t("detail.downloads", locale)}: ${formatNumber(info.downloads)}/mo`);
-    if (info.keywords?.length) lines.push(`${t("detail.keywords", locale)}: ${info.keywords.join(", ")}`);
-    if (info.npmUrl) lines.push(`npm: ${info.npmUrl}`);
-    if (info.repoUrl) lines.push(`repo: ${info.repoUrl}`);
+      if (info.source) lines.push(`source: ${info.source}`);
+      if (info.sourceType || info.scope) lines.push(`scope: ${[info.scope, info.sourceType].filter(Boolean).join(" · ")}`);
+      if (info.searchReasons?.length) lines.push(`match: ${info.searchReasons.join(", ")}`);
+      if (info.version) lines.push(`${t("detail.version", locale)}: ${info.version}`);
+      if (info.latestVersion && !info.installed) lines.push(`${t("detail.latest", locale)}: ${info.latestVersion}`);
+      if (info.author) lines.push(`${t("detail.author", locale)}: ${info.author}`);
+      if (info.license) lines.push(`${t("detail.license", locale)}: ${info.license}`);
+      if (info.types?.length) lines.push(`${t("detail.types", locale)}: ${info.types.map((tp) => localizeType(tp, locale)).join(", ")}`);
+      lines.push(...formatResourceSummary(info.piManifest));
+      lines.push(...formatSecuritySummary(info));
 
-    // 操作按钮（emoji 在此统一加，i18n 值不含 emoji）
-    const options: string[] = [];
-    if (info.installed) {
-      if (hasUpdate) options.push(`⬆️  ${t("detail.update", locale)}`);
-      options.push(`🗑️  ${t("detail.remove", locale)}`);
-    } else {
-      options.push(`📥 ${t("detail.install", locale)}`);
-    }
-    options.push(t("nav.back", locale));   // i18n 已含 ↩️
+      // ── Embed audit results if available ──
+      if (lastAudit) {
+        lines.push("");
+        lines.push(`🔒 Security Audit: ${RISK_BADGE[lastAudit.overallRisk]}`);
+        lines.push(...lastAudit.detailLines.map((l) => `  ${l}`));
+        if (lastAudit.errors.length > 0) {
+          lines.push("  ⚠️ Audit warnings:");
+          lines.push(...lastAudit.errors.map((e) => `    - ${e}`));
+        }
+      }
 
-    const choice = await ctx.ui.select(lines.join("\n"), options);
+      if (info.downloads) lines.push(`${t("detail.downloads", locale)}: ${formatNumber(info.downloads)}/mo`);
+      if (info.keywords?.length) lines.push(`${t("detail.keywords", locale)}: ${info.keywords.join(", ")}`);
+      if (info.npmUrl) lines.push(`npm: ${info.npmUrl}`);
+      if (info.repoUrl) lines.push(`repo: ${info.repoUrl}`);
 
-    if (!choice) return;
+      // 操作按钮
+      const options: string[] = [];
+      if (!lastAudit) {
+        options.push(`🔍 Run security audit`);
+      } else {
+        options.push(`🔍 Re-run audit`);
+      }
+      if (info.installed) {
+        if (hasUpdate) options.push(`⬆️  ${t("detail.update", locale)}`);
+        options.push(`🗑️  ${t("detail.remove", locale)}`);
+      } else {
+        options.push(`📥 ${t("detail.install", locale)}`);
+      }
+      options.push(t("nav.back", locale));   // i18n 已含 ↩️
 
-    if (choice.includes(t("detail.install", locale))) {
-      await installPackageFlow(info.name, ctx);
-    } else if (choice.includes(t("detail.remove", locale))) {
-      const removed = await removePackageFlow(info.name, ctx);
-      if (removed) return;  // 卸载成功 → 返回上一层列表（会自动刷新）
-    } else if (choice.includes(t("detail.update", locale))) {
-      await updatePackages(info.name, ctx);
+      const choice = await ctx.ui.select(lines.join("\n"), options);
+
+      if (!choice) return;
+
+      if (choice.includes("Run security audit") || choice.includes("Re-run audit")) {
+        showLoading(ctx, `🔍 Auditing ${info.name}...`);
+        try {
+          lastAudit = await auditPackage(info.name, { deepScan: true });
+        } catch (err) {
+          lastAudit = {
+            packageName: info.name,
+            version: "unknown",
+            overallRisk: "unknown",
+            metadata: { types: [], dependencyCount: 0, peerDependencyCount: 0, isInsecure: false, version: "unknown" },
+            findings: [],
+            summary: `Audit failed: ${err instanceof Error ? err.message : String(err)}`,
+            detailLines: [`Audit failed: ${err instanceof Error ? err.message : String(err)}`],
+            deepScanned: false,
+            errors: [String(err)],
+          };
+        }
+        clearLoading(ctx);
+        continue;  // re-render detail page with audit results
+      }
+
+      if (choice.includes(t("detail.install", locale))) {
+        await installPackageFlow(info.name, ctx);
+        return;
+      } else if (choice.includes(t("detail.remove", locale))) {
+        const removed = await removePackageFlow(info.name, ctx);
+        if (removed) return;
+        return;
+      } else if (choice.includes(t("detail.update", locale))) {
+        await updatePackages(info.name, ctx);
+        return;
+      }
+      return;  // back
     }
   }
 

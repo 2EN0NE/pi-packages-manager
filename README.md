@@ -5,7 +5,7 @@ Pi packages without leaving Pi. Inspired by the Claude Code package UX.
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [Pi Discussion](https://github.com/earendil-works/pi/discussions/5322) · [npm](https://www.npmjs.com/package/pi-packages-manager)
 
-![status](https://img.shields.io/badge/status-1.0.1-blue)
+![status](https://img.shields.io/badge/status-1.1.0-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
 ## Features
@@ -21,10 +21,15 @@ Pi packages without leaving Pi. Inspired by the Claude Code package UX.
 - ⬆️ Update all with skip detection for pinned, git and local sources
 - 🛡️ Detail page surfacing extensions, skills, prompts, themes, source type
   and trust warnings
-- 🔒 **Pre-install security audit**: every install runs a static analysis
-  pass (metadata + source-code keyword scan) and surfaces a 4-tier risk
-  badge. `high` / `critical` packages require a stronger "Install anyway"
+- 🔒 **Pre-install security audit**: every install runs a two-layer static
+  analysis (metadata + source-code keyword scan) with 4-tier risk
+  classification. High/critical packages require explicit "Install anyway"
   confirmation.
+- 🤖 **Natural language tools**: 4 LLM-callable tools (`packages_search`,
+  `packages_detail`, `packages_audit`, `packages_install`) — ask Pi to
+  find, audit, or install packages in plain English.
+- 🔍 **Audit in detail page**: one-click "Run security audit" button on
+  every package detail page, with results embedded inline.
 - 🧭 Subcommands for power users: `list`, `search`, `install`, `remove`,
   `update`, `info`, `settings`, `refresh`, `panel`, `legacy`
 
@@ -82,8 +87,33 @@ The audit is fail-safe: if `npm view` or `npm pack` fails (network,
 timeout, etc.), the install is **not** blocked, but the failure is shown
 in the confirm dialog so the user can decide.
 
+You can also trigger an audit from the **detail page** — click "🔍 Run security
+audit" to scan any package on demand.
+
 Credits: the audit module is adapted from
 [pi-marketplace](https://github.com/507/pi-marketplace).
+
+## Natural language tools
+
+This extension registers 4 tools that the LLM can call directly. Try saying:
+
+> "Find me a Pi package for MCP"
+
+> "Show me details of pi-tinyfish-tools"
+
+> "Audit the package pi-mcp-adapter before installing"
+
+> "Install pi-autoname"
+
+| Tool | What it does |
+| --- | --- |
+| `packages_search` | Search packages by keyword, filter by type |
+| `packages_detail` | Full package info: version, author, resources, links |
+| `packages_audit` | Security audit: metadata + source code scan |
+| `packages_install` | Audit → confirm → install |
+
+These tools coexist with the `/packages-list` command — use whichever feels
+more natural.
 
 ## Usage
 
@@ -98,7 +128,7 @@ Open the overlay panel:
 | `Tab` / `⇧Tab` | Switch tabs |
 | `↑` / `↓` | Navigate |
 | `Enter` | Open package detail |
-| `/` (Browse tab) | Open search flow |
+| `/` | Focus search bar |
 | `g` (Settings tab) | Reminder to run `pi config` |
 | `Esc` / `q` | Close panel |
 
@@ -150,18 +180,17 @@ Run the extension directly from source:
 pi -e ./src/index.ts
 ```
 
-Smoke-test loading:
+Run tests:
 
 ```bash
-node -e 'import("@earendil-works/pi-coding-agent/dist/core/extensions/loader.js").then(({loadExtensions})=>loadExtensions(["./src/index.ts"], process.cwd())).then(r=>console.log(r.errors,r.extensions[0].commands.keys()))'
+npm test
 ```
 
 ## Roadmap
 
 See [docs/ROADMAP.md](docs/ROADMAP.md).
 
-Next up: live search input, detail side panel, in-panel install/remove
-shortcuts.
+Next up: detail side panel, in-panel shortcuts, filter chips.
 
 ## License
 

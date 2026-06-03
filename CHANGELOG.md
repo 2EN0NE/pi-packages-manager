@@ -5,29 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.0] - 2026-06-03
 
 ### Added
 
-- **Pre-install security audit** (`src/security.ts`): a static analysis
-  module that runs before every install. It checks package metadata via
-  `npm view` and performs a keyword scan of the published source code
-  (`npm pack` + `tar` + grep against 15 known-dangerous patterns including
-  `rm -rf`, `rimraf`, `fs.unlink`, `eval`, `Function`, `execSync`, `spawn`).
+- **Pre-install security audit** (`src/security.ts`): two-layer static
+  analysis that runs before every install. Layer 1 checks metadata via
+  `npm view` (deps, peers, file count, size, npm insecure flag). Layer 2
+  downloads the tarball and scans source code against 15 known-dangerous
+  patterns (`rm -rf`, `eval`, `execSync`, `spawn`, etc.).
 - **4-tier risk classification** (`safe` / `low` / `medium` / `high` /
-  `critical`): extensions with `critical` or `high` findings trigger a
-  two-step confirmation (a select with an explicit "Install anyway"
-  option) instead of a regular yes/no prompt. Lower-risk packages still
-  see the audit summary in their confirmation dialog.
-- **`npm test`** script: 14 unit + integration tests covering risk
-  evaluation, pattern catalog integrity, and end-to-end audit against a
-  real npm package. Requires Node ≥ 22.6 for `--experimental-strip-types`.
+  `critical`). High/critical packages require a two-step "Install anyway"
+  confirmation instead of a simple yes/no.
+- **Pi tools** (`src/tools.ts`): registered 4 LLM-callable tools so users
+  can search, audit, and install packages via natural language:
+  - `packages_search` — search by keyword or type
+  - `packages_detail` — full package metadata
+  - `packages_audit` — security audit with risk report
+  - `packages_install` — audit + confirm + install
+- **Audit button in detail page**: package detail view now has a
+  "🔍 Run security audit" button that runs the scan and embeds results
+  inline. Users can re-run audits at any time.
+- **Test suite**: 14 unit + integration tests covering risk evaluation,
+  pattern catalog integrity, and end-to-end audit against real npm
+  packages.
 
 ### Credits
 
 - Security audit module adapted from
   [pi-marketplace](https://github.com/507/pi-marketplace) by
-  [@ssdiwu](https://github.com/ssdiwu).
+  [@ssdiwu](https://github.com/ssdiwu) (PR #1).
 
 ## [1.0.3] - 2026-06-03
 

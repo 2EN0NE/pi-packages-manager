@@ -5,7 +5,7 @@ Claude Code 的包管理体验。
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [Pi Discussion](https://github.com/earendil-works/pi/discussions/5322) · [npm](https://www.npmjs.com/package/pi-packages-manager)
 
-![status](https://img.shields.io/badge/status-1.0.1-blue)
+![status](https://img.shields.io/badge/status-1.1.0-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
 ## 功能特性
@@ -18,9 +18,13 @@ Claude Code 的包管理体验。
 - ⬇️ 安装 / 卸载 / 更新流程支持作用域选择（全局 / 项目）、安全确认、reload 提示
 - ⬆️ Update all 一键更新所有包，自动跳过 pinned / git / local 来源
 - 🛡️ 详情页展示 extension / skill / prompt / theme 资源以及来源类型与信任警告
-- 🔒 **安装前安全审计**：每次安装都先跑静态分析（metadata + 源码关键词扫描），
-  展示 4 档风险徽章。`high` / `critical` 级别的包需要二次确认（必须选
-  “仍要安装”才能继续）。
+- 🔒 **安装前安全审计**：每次安装都先跑两层静态分析（元数据 + 源码关键词扫描），
+  4 档风险分级。`high` / `critical` 级别的包需要二次确认。
+- 🤖 **自然语言工具**：注册 4 个 LLM 可调用的工具（`packages_search`、
+  `packages_detail`、`packages_audit`、`packages_install`），用户可以直接用
+  自然语言搜索、审计、安装包。
+- 🔍 **详情页审计按钮**：每个包详情页都有一键"运行安全审计"按钮，结果直接
+  嵌入展示。
 - 🧭 子命令完整：`list`、`search`、`install`、`remove`、`update`、`info`、
   `settings`、`refresh`、`panel`、`legacy`
 
@@ -69,13 +73,36 @@ pi install /path/to/pi-packages-manager
 | --- | --- | --- |
 | 🟢 safe | 深度扫描无发现 | 常规 confirm + 摘要 |
 | 🟢 low / 🟡 medium | 仅有 low/medium 发现，或 3+ 个 medium | 常规 confirm + 摘要 |
-| 🟠 high | 任何 high 发现，或在 extension 内的高危模式 | 两步选择 — 需选 “仍要安装” |
-| 🔴 critical | 任何 critical 发现 | 两步选择 — 需选 “仍要安装” |
+| 🟠 high | 任何 high 发现，或在 extension 内的高危模式 | 两步选择 — 需选 "仍要安装" |
+| 🔴 critical | 任何 critical 发现 | 两步选择 — 需选 "仍要安装" |
 
 审计是**失败安全**的：`npm view` 或 `npm pack` 出错（网络、超时等）不会
 阻塞安装，但会在 confirm 框里显示失败信息，由用户决定。
 
+你也可以在**包详情页**直接点击"🔍 运行安全审计"按钮，对任意包进行按需扫描。
+
 致谢：审计模块改编自 [pi-marketplace](https://github.com/507/pi-marketplace)。
+
+## 自然语言工具
+
+本扩展注册了 4 个 LLM 可调用的工具，你可以直接用自然语言与 Pi 对话：
+
+> "帮我找一个 MCP 相关的包"
+
+> "看看 pi-tinyfish-tools 的详情"
+
+> "审计一下 pi-mcp-adapter 安全吗"
+
+> "安装 pi-autoname"
+
+| 工具 | 功能 |
+| --- | --- |
+| `packages_search` | 按关键词/类型搜索包 |
+| `packages_detail` | 查看完整包信息（版本、作者、资源、链接） |
+| `packages_audit` | 安全审计：元数据 + 源码扫描 |
+| `packages_install` | 审计 → 确认 → 安装 |
+
+这些工具与 `/packages-list` 命令并存——随你喜欢用哪种方式。
 
 ## 使用
 
@@ -90,7 +117,7 @@ pi install /path/to/pi-packages-manager
 | `Tab` / `⇧Tab` | 切换标签 |
 | `↑` / `↓` | 上下导航 |
 | `Enter` | 打开包详情 |
-| `/`（社区标签） | 打开搜索流 |
+| `/` | 聚焦搜索栏 |
 | `g`（设置标签） | 提示运行 `pi config` |
 | `Esc` / `q` | 关闭面板 |
 
@@ -135,17 +162,17 @@ pi install /path/to/pi-packages-manager
 pi -e ./src/index.ts
 ```
 
-加载冒烟测试：
+运行测试：
 
 ```bash
-node -e 'import("@earendil-works/pi-coding-agent/dist/core/extensions/loader.js").then(({loadExtensions})=>loadExtensions(["./src/index.ts"], process.cwd())).then(r=>console.log(r.errors,r.extensions[0].commands.keys()))'
+npm test
 ```
 
 ## 路线图
 
 详见 [docs/ROADMAP.md](docs/ROADMAP.md)。
 
-下一轮计划：实时搜索框、详情侧栏、面板内 install/remove 快捷键。
+下一轮计划：详情侧栏、面板内快捷键、过滤器 chip。
 
 ## 许可证
 
