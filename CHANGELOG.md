@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-06-04
+
+### Added
+
+- **Quick shortcuts**: press `i` to install, `r` to remove, `u` to update,
+  `a` to audit, `?` for help overlay — all without leaving the panel.
+- **Filter chips**: tab bar now shows `[All] [extension] [skill] [prompt] [theme]`
+  chips, press `1-5` to filter by resource type.
+- **Inline detail view**: `Enter` opens package detail inside the panel
+  instead of closing it. Shows version, author, resources, and audit results.
+  Press `←` or `Esc` to return to the list.
+- **Help overlay**: press `?` to see all keyboard shortcuts.
+
 ## [1.1.0] - 2026-06-03
 
 ### Added

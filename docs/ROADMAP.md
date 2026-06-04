@@ -3,7 +3,7 @@
 pi-packages-manager 后续版本迭代计划。按优先级排列，标注工作量与参考来源。
 
 更新时间：2026-06-03
-当前版本：**1.1.0**
+当前版本：**1.2.0**
 
 ---
 
@@ -41,20 +41,12 @@ pi-packages-manager 后续版本迭代计划。按优先级排列，标注工作
 - ✅ **B. 注册 Pi 工具** — `packages_search` / `packages_detail` / `packages_audit` / `packages_install` 四个工具，用户通过自然语言触发
 - ✅ **D. 审计报告嵌入详情页** — 详情页新增 🔍 Run security audit 按钮，结果直接嵌入展示
 
----
+### v1.2.0 — 面板交互升级（2026-06-04）
 
-## 迭代计划
-
-### v1.2.0 — 面板交互升级
-
-| # | 特性 | 说明 | 工作量 |
-|---|------|------|--------|
-| **E** | 📋 详情侧栏 | `Enter` 不关闭 panel，右侧 split 区渲染详情（版本、作者、Resources、Security）。`←` 收起。安装/删除/更新直接在右侧执行 | 1.5 天 |
-| **F** | ⚡ 操作快捷键 | 面板内不进详情直接操作：`i` 安装、`r` 删除、`u` 更新、`?` 帮助 overlay | 0.5 天 |
-| **G** | 🏷 过滤器 chip | Tab 下方加 chip 栏：`[All] [extension] [skill] [prompt] [theme]`，按 `1-5` 切换。Browse 加来源筛选 `[npm] [git] [local]` | 0.5 天 |
-| **H** | 📊 状态增强 | Loading spinner（异步加载时）、空状态重试（网络错误时"按 r 重试"）、visual scrollbar | 0.5 天 |
-
-**预计工期：3 天**
+- ✅ **E. 内联详情视图** — Enter 不关闭面板，内嵌展示包详情 + 审计结果，← 返回列表
+- ✅ **F. 操作快捷键** — i 安装、r 删除、u 更新、a 审计、? 帮助
+- ✅ **G. 过滤器 chip** — [All] [extension] [skill] [prompt] [theme]，按 1-5 切换
+- ✅ **H. 帮助 overlay** — 按 ? 查看所有快捷键
 
 ---
 

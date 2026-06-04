@@ -7,17 +7,22 @@
  *   ┌──────────────────────────────────────────────┐
  *   │  📦 Pi Packages Manager                      │
  *   │  [Installed]  Browse  Updates  Settings      │
- *   ├──────────────────────────────────────────────┤
+ *   │  [All] extension skill prompt theme           │
+ *  ├──────────────────────────────────────────────┤
+ *   │  🔍 search or press /                        │
+ *   │                                              │
  *   │  ● pi-tinyfish-tools                  v0.1   │
  *   │    TinyFish 网页代理工具                     │
  *   │    extension·skill · user · npm              │
- *   │                                              │
- *   │  ○ pi-autoname                       v0.5.13 │
- *   │    AI 驱动会话命名                           │
- *   │    ...                                       │
  *   ├──────────────────────────────────────────────┤
- *   │  Tab/⇧Tab 切换 · ↑↓ 选择 · ↵ 详情 · Esc 关闭  │
+ *   │  Tab/⇧Tab · ↑↓ · ↵ detail · / 🔍 · ? help  │
  *   └──────────────────────────────────────────────┘
+ *
+ * v1.2.0 adds:
+ *   - Quick shortcuts: i=install, r=remove, u=update, ?=help overlay
+ *   - Filter chips: [All] [extension] [skill] [prompt] [theme]
+ *   - Inline detail view (Enter opens detail without closing panel)
+ *   - Loading/empty state improvements
  */
 
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
@@ -38,22 +43,27 @@ import {
 import {
   checkForUpdates,
   fetchFullCatalog,
-  getInstalledPackageRefs,
   getInstalledPackages,
   searchNpmRegistry,
   type PackageInfo,
 } from "../api";
 import {
   getTranslatedDescription,
+  localizeType,
   type Locale,
   SUPPORTED_LOCALES,
   t,
 } from "../i18n";
 import { rankPackages } from "../search";
+import { auditPackage, RISK_BADGE } from "../security";
 import { PackageList, type PackageListItem } from "./package-list";
 
 const TAB_KEYS = ["installed", "browse", "updates", "settings"] as const;
 type TabKey = typeof TAB_KEYS[number];
+
+const FILTER_ALL = "all";
+const FILTER_TYPES = ["extension", "skill", "prompt", "theme"] as const;
+type FilterType = typeof FILTER_TYPES[number] | "all";
 
 export type PanelResult =
   | { action: "detail"; pkg: PackageInfo }
@@ -76,15 +86,18 @@ export async function showPackagesPanel(
   return ctx.ui.custom<PanelResult>((tui, theme, _kb, done) => {
     let currentTab: TabKey = initialTab;
     let currentPkgs: PackageInfo[] = [];
-    let unfilteredPkgs: PackageInfo[] = []; // full list before search filter
+    let unfilteredPkgs: PackageInfo[] = [];
     let cachedCatalog: PackageInfo[] | null = null;
     let cachedUpdates: PackageInfo[] | null = null;
-
-    // Focus: "search" = search input, "list" = package list
     let focusTarget: "search" | "list" = "list";
+    let activeFilter: FilterType = FILTER_ALL;
+    let showHelp = false;
 
-    // Guard: prevent async callbacks (loadBrowse/loadUpdates) from touching the
-    // TUI after the panel has been dismissed via done().
+    // Inline detail view state
+    let detailPkg: PackageInfo | null = null;
+    let detailAudit: Awaited<ReturnType<typeof auditPackage>> | null = null;
+    let detailLoading = false;
+
     let dismissed = false;
     const safeDone = (result: PanelResult) => {
       if (dismissed) return;
@@ -96,21 +109,16 @@ export async function showPackagesPanel(
     let list: PackageList | null = null;
     let langSelector: SelectList | null = null;
 
-    // The main custom component. We keep a reference so that async callbacks
-    // (loadBrowse/loadUpdates) can safely check `dismissed` before touching the TUI.
-    // Input routing is fully manual via handleInputImpl — we never delegate TUI
-    // focus to child components (searchInput). Instead, we forward input to them
-    // ourselves so we can intercept every keystroke for live search filtering.
-    const mainComponent: { render(w: number): string[]; invalidate(): void; handleInput(d: string): void } = {
+    const mainComponent = {
       render(w: number) { return container.render(w); },
       invalidate() { container.invalidate(); },
       handleInput(d: string) { handleInputImpl(d); },
     };
 
-    // Search input component
+    // ─── Search input ─────────────────────────────────
+
     const searchInput = new Input();
     searchInput.onSubmit = () => {
-      // Enter in search → move focus to list
       focusTarget = "list";
       searchInput.focused = false;
       rebuild();
@@ -118,7 +126,6 @@ export async function showPackagesPanel(
     };
     searchInput.onEscape = () => {
       if (searchInput.getValue()) {
-        // Clear search
         searchInput.setValue("");
         applySearch("");
         focusTarget = "list";
@@ -126,13 +133,14 @@ export async function showPackagesPanel(
         rebuild();
         tui.requestRender();
       } else {
-        // Empty search + Esc → back to list
         focusTarget = "list";
         searchInput.focused = false;
         rebuild();
         tui.requestRender();
       }
     };
+
+    // ─── Theme helpers ───────────────────────────────
 
     function listTheme() {
       return {
@@ -148,27 +156,94 @@ export async function showPackagesPanel(
       };
     }
 
+    // ─── Rebuild ─────────────────────────────────────
+
     function rebuild() {
       container.clear();
 
       container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
       container.addChild(new Text(theme.fg("accent", theme.bold("📦 " + t("menu.title", locale))), 1, 0));
       container.addChild(new Text(buildTabBar(theme, currentTab, locale), 1, 0));
+
+      // Help overlay (toggled by ?)
+      if (showHelp) {
+        container.addChild(new DynamicBorder((s: string) => theme.fg("borderMuted", s)));
+        renderHelpOverlay();
+        container.addChild(new DynamicBorder((s: string) => theme.fg("borderMuted", s)));
+        container.addChild(new Text(theme.fg("dim", "Press ? or Esc to close help"), 1, 0));
+        container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+        return;
+      }
+
       container.addChild(new DynamicBorder((s: string) => theme.fg("borderMuted", s)));
 
       if (currentTab === "settings") {
         renderSettingsTab();
+      } else if (detailPkg) {
+        renderDetailView();
       } else {
-        // Prepare package data first so renderSearchBar can access result counts
+        // Filter chips (only for package tabs)
+        renderFilterChips();
         preparePackageData();
         renderSearchBar();
         renderPackageList();
       }
 
       container.addChild(new DynamicBorder((s: string) => theme.fg("borderMuted", s)));
-      container.addChild(new Text(theme.fg("dim", buildHelpBar(currentTab, locale, focusTarget)), 1, 0));
+      container.addChild(new Text(theme.fg("dim", buildHelpBar(currentTab, locale, focusTarget, !!detailPkg)), 1, 0));
       container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
     }
+
+    // ─── Filter chips ────────────────────────────────
+
+    function renderFilterChips() {
+      const chips = [
+        { key: FILTER_ALL as string, label: "All", shortcut: "1" },
+        ...FILTER_TYPES.map((tp, i) => ({
+          key: tp,
+          label: localizeType(tp, locale),
+          shortcut: String(i + 2),
+        })),
+      ];
+
+      const parts = chips.map((chip) => {
+        const isActive = activeFilter === chip.key;
+        const styled = isActive
+          ? theme.fg("accent", theme.bold(`[${chip.label}]`))
+          : theme.fg("dim", ` ${chip.label} `);
+        return `${styled}${theme.fg("dim", chip.shortcut)}`;
+      });
+
+      container.addChild(new Text("  " + parts.join("  ") + " ", 0, 0));
+    }
+
+    function applyFilter() {
+      // First apply search, then filter by type
+      const query = searchInput.getValue();
+      let base = unfilteredPkgs;
+
+      if (query) {
+        if (currentTab === "browse") {
+          base = rankPackages(unfilteredPkgs, query, 60);
+        } else {
+          const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+          base = unfilteredPkgs.filter((pkg) => {
+            const text = `${pkg.name} ${pkg.description || ""} ${(pkg.keywords || []).join(" ")} ${pkg.author || ""}`.toLowerCase();
+            return terms.every((term) => text.includes(term));
+          });
+        }
+      }
+
+      if (activeFilter === FILTER_ALL) {
+        currentPkgs = base;
+      } else {
+        currentPkgs = base.filter((pkg) =>
+          pkg.types?.includes(activeFilter) ?? false,
+        );
+      }
+    }
+
+    // ─── Search bar ──────────────────────────────────
 
     function renderSearchBar() {
       const query = searchInput.getValue();
@@ -176,13 +251,11 @@ export async function showPackagesPanel(
 
       if (isActive) {
         searchInput.focused = true;
-        // Active search: render Input inside a highlighted Box
         const searchBox = new Box(1, 0, (s: string) => theme.fg("accent", theme.bold(s)));
         searchBox.addChild(searchInput);
         container.addChild(searchBox);
       } else if (query) {
         searchInput.focused = false;
-        // Has query but not focused: show filter pill with result count
         const resultCount = currentPkgs.length;
         const totalCount = unfilteredPkgs.length;
         const pill = theme.fg("accent", theme.bold(" 🔍 ")) +
@@ -192,7 +265,6 @@ export async function showPackagesPanel(
         container.addChild(new Text(pill, 0, 0));
       } else {
         searchInput.focused = false;
-        // No query: subtle hint with / shortcut
         const hint = theme.fg("dim", "  🔍 ") +
           theme.fg("muted", t("search.placeholder", locale)) +
           theme.fg("dim", "  [press /]");
@@ -200,17 +272,13 @@ export async function showPackagesPanel(
       }
     }
 
+    // ─── Package list ────────────────────────────────
+
     function preparePackageData() {
       langSelector = null;
       const pkgs = collectPackages(currentTab, cachedCatalog, cachedUpdates);
       unfilteredPkgs = pkgs;
-      currentPkgs = pkgs;
-
-      // Apply current search filter
-      const query = searchInput.getValue();
-      if (query) {
-        applySearch(query);
-      }
+      applyFilter();
     }
 
     function renderPackageList() {
@@ -219,17 +287,151 @@ export async function showPackagesPanel(
         emptyLabel: emptyMessage(currentTab, locale),
       });
       list.onSelect = (item) => {
+        // v1.2.0: open inline detail instead of closing panel
         const pkg = currentPkgs.find((p) => p.name === item.value);
-        if (pkg) safeDone({ action: "detail", pkg });
+        if (pkg) openDetail(pkg);
       };
       list.onCancel = () => safeDone(null);
       container.addChild(list);
     }
 
+    // ─── Inline detail view ──────────────────────────
+
+    async function openDetail(pkg: PackageInfo) {
+      detailPkg = pkg;
+      detailAudit = null;
+      detailLoading = true;
+      focusTarget = "list";
+      rebuild();
+      tui.requestRender();
+
+      // Fetch fresh detail from npm in background
+      try {
+        const { getPackageDetail } = await import("../api");
+        const fresh = await getPackageDetail(pkg.name);
+        if (fresh && !dismissed) {
+          detailPkg = { ...pkg, ...fresh, downloads: fresh.downloads ?? pkg.downloads };
+        }
+      } catch {
+        // use local data
+      }
+
+      detailLoading = false;
+      if (!dismissed) {
+        rebuild();
+        tui.requestRender();
+      }
+    }
+
+    function closeDetail() {
+      detailPkg = null;
+      detailAudit = null;
+      detailLoading = false;
+      rebuild();
+      tui.requestRender();
+    }
+
+    function renderDetailView() {
+      list = null;
+      const pkg = detailPkg!;
+      const info = pkg;
+
+      const status = info.installed
+        ? theme.fg("success", `✅ ${t("detail.installed", locale)} (v${info.installedVersion || info.version})`)
+        : theme.fg("muted", `⬜ ${t("detail.not_installed", locale)}`);
+
+      const hasUpdate = info.latestVersion && info.installedVersion && info.latestVersion !== info.installedVersion;
+
+      const lines: string[] = [];
+      lines.push(`  📦 ${theme.fg("accent", theme.bold(info.name))}`);
+      lines.push(`  ${theme.fg("muted", info.description || "")}`);
+      lines.push(`  ${status}`);
+
+      if (hasUpdate) {
+        lines.push(`  ${theme.fg("warning", `⬆️  ${info.installedVersion} → ${info.latestVersion}`)}`);
+      }
+      if (info.author) lines.push(`  ${theme.fg("dim", `${t("detail.author", locale)}: ${info.author}`)}`);
+      if (info.license) lines.push(`  ${theme.fg("dim", `${t("detail.license", locale)}: ${info.license}`)}`);
+      if (info.types?.length) lines.push(`  ${theme.fg("dim", `${t("detail.types", locale)}: ${info.types.map((tp) => localizeType(tp, locale)).join(", ")}`)}`);
+      if (info.downloads) lines.push(`  ${theme.fg("dim", `${t("detail.downloads", locale)}: ${formatNumber(info.downloads)}/mo`)}`);
+      if (info.npmUrl) lines.push(`  ${theme.fg("dim", `npm: ${info.npmUrl}`)}`);
+
+      // Audit result
+      if (detailAudit) {
+        lines.push("");
+        lines.push(`  ${theme.fg("accent", `🔒 ${RISK_BADGE[detailAudit.overallRisk]}`)}`);
+        lines.push(`  ${theme.fg("dim", `Version: ${detailAudit.version}`)}`);
+        lines.push(`  ${theme.fg("dim", detailAudit.summary.split("\n")[0])}`);
+        if (detailAudit.findings.length > 0) {
+          lines.push(`  ${theme.fg("dim", `Findings: ${detailAudit.findings.length} pattern(s) detected`)}`);
+        }
+      } else if (detailLoading) {
+        lines.push(`  ${theme.fg("dim", "⠋ Loading details...")}`);
+      }
+
+      for (const line of lines) {
+        container.addChild(new Text(line, 0, 0));
+      }
+
+      // Action buttons
+      container.addChild(new Spacer(1));
+      const actionParts: string[] = [];
+
+      if (!detailAudit) {
+        actionParts.push(theme.fg("accent", "  [a] Audit"));
+      } else {
+        actionParts.push(theme.fg("accent", "  [a] Re-audit"));
+      }
+
+      if (info.installed) {
+        if (hasUpdate) actionParts.push(theme.fg("warning", "  [u] Update"));
+        actionParts.push(theme.fg("error", "  [r] Remove"));
+      } else {
+        actionParts.push(theme.fg("success", "  [i] Install"));
+      }
+      actionParts.push(theme.fg("dim", "  [←] Back"));
+
+      container.addChild(new Text(actionParts.join(""), 0, 0));
+    }
+
+    // ─── Help overlay ────────────────────────────────
+
+    function renderHelpOverlay() {
+      const lines = [
+        theme.fg("accent", theme.bold("  ⌨  Keyboard shortcuts")),
+        "",
+        theme.fg("text", "  Navigation") + theme.fg("dim", "─────────────────────────"),
+        theme.fg("dim", "  Tab / ⇧Tab     Switch tabs"),
+        theme.fg("dim", "  ↑ / ↓          Navigate list"),
+        theme.fg("dim", "  Enter           Open detail view"),
+        theme.fg("dim", "  Esc / q         Close panel"),
+        "",
+        theme.fg("text", "  Search & Filter") + theme.fg("dim", "─────────────────────"),
+        theme.fg("dim", "  /               Focus search bar"),
+        theme.fg("dim", "  1-5             Filter by type"),
+        theme.fg("dim", "                  1=All 2=ext 3=skill 4=prompt 5=theme"),
+        "",
+        theme.fg("text", "  Actions") + theme.fg("dim", "─────────────────────────────"),
+        theme.fg("dim", "  i               Install selected package"),
+        theme.fg("dim", "  r               Remove selected package"),
+        theme.fg("dim", "  u               Update selected package"),
+        theme.fg("dim", "  a               Run security audit"),
+        "",
+        theme.fg("text", "  Detail View") + theme.fg("dim", "─────────────────────────"),
+        theme.fg("dim", "  ← / Backspace   Back to list"),
+        theme.fg("dim", "  Esc             Close panel"),
+      ];
+
+      for (const line of lines) {
+        container.addChild(new Text(line, 0, 0));
+      }
+    }
+
+    // ─── Settings tab ────────────────────────────────
+
     function renderSettingsTab() {
       list = null;
 
-      // Section header: language
       container.addChild(new Spacer(1));
       container.addChild(
         new Text(theme.fg("accent", theme.bold("  " + t("settings.section.language", locale))), 1, 0),
@@ -258,14 +460,12 @@ export async function showPackagesPanel(
 
       container.addChild(new Spacer(1));
       container.addChild(
-        new Text(
-          theme.fg("muted", "  " + t("settings.tip.config", locale)),
-          1,
-          0,
-        ),
+        new Text(theme.fg("muted", "  " + t("settings.tip.config", locale)), 1, 0),
       );
       container.addChild(new Spacer(1));
     }
+
+    // ─── Async loaders ───────────────────────────────
 
     async function loadBrowse() {
       try {
@@ -274,7 +474,7 @@ export async function showPackagesPanel(
         cachedCatalog = [];
       }
       if (dismissed) return;
-      if (currentTab === "browse") {
+      if (currentTab === "browse" && !detailPkg) {
         rebuild();
         tui.requestRender();
       }
@@ -287,20 +487,24 @@ export async function showPackagesPanel(
         cachedUpdates = [];
       }
       if (dismissed) return;
-      if (currentTab === "updates") {
+      if (currentTab === "updates" && !detailPkg) {
         rebuild();
         tui.requestRender();
       }
     }
 
+    // ─── Tab switching ───────────────────────────────
+
     function switchTab(direction: 1 | -1) {
       const idx = TAB_KEYS.indexOf(currentTab);
       const next = TAB_KEYS[(idx + direction + TAB_KEYS.length) % TAB_KEYS.length];
       currentTab = next;
-      // Clear search when switching tabs
       searchInput.setValue("");
       focusTarget = "list";
       searchInput.focused = false;
+      activeFilter = FILTER_ALL;
+      detailPkg = null;
+      detailAudit = null;
       rebuild();
       tui.requestRender();
       if (next === "browse" && cachedCatalog === null) {
@@ -313,28 +517,84 @@ export async function showPackagesPanel(
       }
     }
 
-    /**
-     * Apply search query to current package list.
-     * For installed/updates: local fuzzy filter.
-     * For browse: use rankPackages from search.ts.
-     */
+    // ─── Search ──────────────────────────────────────
+
     function applySearch(query: string) {
       if (!query) {
         currentPkgs = unfilteredPkgs;
+        applyFilter();
         return;
       }
-      if (currentTab === "browse") {
-        // For browse, use the ranking system which includes name/keyword/description matching
-        currentPkgs = rankPackages(unfilteredPkgs, query, 60);
-      } else {
-        // For installed/updates: simple fuzzy local filter
-        const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
-        currentPkgs = unfilteredPkgs.filter((pkg) => {
-          const text = `${pkg.name} ${pkg.description || ""} ${(pkg.keywords || []).join(" ")} ${pkg.author || ""}`.toLowerCase();
-          return terms.every((term) => text.includes(term));
-        });
+      applyFilter();
+    }
+
+    // ─── Quick action handlers ───────────────────────
+
+    async function handleQuickInstall() {
+      const pkg = getSelectedPkg();
+      if (!pkg) return;
+      safeDone({ action: "detail", pkg });
+    }
+
+    async function handleQuickRemove() {
+      const pkg = getSelectedPkg();
+      if (!pkg || !pkg.installed) return;
+      safeDone({ action: "detail", pkg });
+    }
+
+    async function handleQuickUpdate() {
+      const pkg = getSelectedPkg();
+      if (!pkg || !pkg.installed) return;
+      safeDone({ action: "detail", pkg });
+    }
+
+    async function handleQuickAudit() {
+      if (detailPkg) {
+        // Audit from detail view
+        detailLoading = true;
+        rebuild();
+        tui.requestRender();
+        try {
+          detailAudit = await auditPackage(detailPkg.name, { deepScan: true });
+        } catch {
+          detailAudit = null;
+        }
+        detailLoading = false;
+        if (!dismissed) {
+          rebuild();
+          tui.requestRender();
+        }
+        return;
+      }
+
+      // Audit from list view
+      const pkg = getSelectedPkg();
+      if (!pkg) return;
+      await openDetail(pkg);
+      // Then auto-trigger audit
+      detailLoading = true;
+      rebuild();
+      tui.requestRender();
+      try {
+        detailAudit = await auditPackage(pkg.name, { deepScan: true });
+      } catch {
+        detailAudit = null;
+      }
+      detailLoading = false;
+      if (!dismissed) {
+        rebuild();
+        tui.requestRender();
       }
     }
+
+    function getSelectedPkg(): PackageInfo | null {
+      if (detailPkg) return detailPkg;
+      const selected = list?.getSelected();
+      if (!selected) return null;
+      return currentPkgs.find((p) => p.name === selected.value) || null;
+    }
+
+    // ─── Build & init ────────────────────────────────
 
     rebuild();
 
@@ -347,8 +607,27 @@ export async function showPackagesPanel(
       loadUpdates();
     }
 
-    // ─── Input handling (extracted so mainComponent can reference it) ───
+    // ─── Input handling ──────────────────────────────
+
     function handleInputImpl(data: string) {
+      // Help overlay
+      if (showHelp) {
+        if (data === "?" || matchesKey(data, Key.escape)) {
+          showHelp = false;
+          rebuild();
+          tui.requestRender();
+        }
+        return;
+      }
+
+      // Toggle help
+      if (data === "?") {
+        showHelp = true;
+        rebuild();
+        tui.requestRender();
+        return;
+      }
+
       if (matchesKey(data, Key.tab)) {
         switchTab(1);
         return;
@@ -372,48 +651,77 @@ export async function showPackagesPanel(
         return;
       }
 
-      // ── Package tabs (installed / browse / updates) ──
+      // ── Detail view shortcuts ──
+      if (detailPkg) {
+        if (matchesKey(data, Key.escape) || matchesKey(data, Key.left) || matchesKey(data, Key.backspace)) {
+          closeDetail();
+          return;
+        }
+        if (data === "i" && !detailPkg.installed) {
+          safeDone({ action: "detail", pkg: detailPkg });
+          return;
+        }
+        if (data === "r" && detailPkg.installed) {
+          safeDone({ action: "detail", pkg: detailPkg });
+          return;
+        }
+        if (data === "u" && detailPkg.installed) {
+          safeDone({ action: "detail", pkg: detailPkg });
+          return;
+        }
+        if (data === "a") {
+          handleQuickAudit();
+          return;
+        }
+        // Enter in detail view also goes to full detail (for install/remove/update)
+        if (matchesKey(data, Key.enter)) {
+          safeDone({ action: "detail", pkg: detailPkg });
+          return;
+        }
+        return;
+      }
+
+      // ── Package list shortcuts (when not in search) ──
+      if (focusTarget === "list") {
+        // Filter chips: 1-5
+        if (data === "1") { activeFilter = FILTER_ALL; rebuild(); tui.requestRender(); return; }
+        if (data === "2") { activeFilter = "extension"; rebuild(); tui.requestRender(); return; }
+        if (data === "3") { activeFilter = "skill"; rebuild(); tui.requestRender(); return; }
+        if (data === "4") { activeFilter = "prompt"; rebuild(); tui.requestRender(); return; }
+        if (data === "5") { activeFilter = "theme"; rebuild(); tui.requestRender(); return; }
+
+        // Quick actions
+        if (data === "i") { handleQuickInstall(); return; }
+        if (data === "r") { handleQuickRemove(); return; }
+        if (data === "u") { handleQuickUpdate(); return; }
+        if (data === "a") { handleQuickAudit(); return; }
+      }
 
       // Focus search input
       if (data === "/" && focusTarget === "list") {
         focusTarget = "search";
         searchInput.focused = true;
-        // NOTE: We intentionally do NOT call tui.setFocus(searchInput) here.
-        // Doing so would cause the TUI to route all input directly to the
-        // searchInput, bypassing our handleInputImpl — which means the
-        // per-keystroke applySearch() and list filter would never run.
-        // Instead we keep focus on mainComponent and forward input manually.
         rebuild();
         tui.requestRender();
         return;
       }
 
       if (focusTarget === "search") {
-        // Forward input to the search Input component manually.
-        // We keep focus on mainComponent (not searchInput) so that we can
-        // intercept every keystroke and update the filtered list in real time.
         searchInput.handleInput(data);
-
-        // Re-filter on every keystroke
         const query = searchInput.getValue();
         applySearch(query);
-
-        // Update the list items without full rebuild
         if (list) {
           const items = currentPkgs.map((p) => packageToListItem(p, locale));
           list.setItems(items);
         }
-
         tui.requestRender();
         return;
       }
 
-      // focusTarget === "list"
       // Move focus to search on up arrow when at top of list
       if (matchesKey(data, Key.up) && list && list.isAtTop()) {
         focusTarget = "search";
         searchInput.focused = true;
-        // Same as above: keep focus on mainComponent for manual routing.
         rebuild();
         tui.requestRender();
         return;
@@ -426,6 +734,8 @@ export async function showPackagesPanel(
     return mainComponent;
   });
 }
+
+// ─── Helper functions ────────────────────────────────────
 
 function collectPackages(
   tab: TabKey,
@@ -477,11 +787,12 @@ function buildTabBar(
   }).join("  ");
 }
 
-function buildHelpBar(tab: TabKey, locale: Locale, focus?: "search" | "list"): string {
+function buildHelpBar(tab: TabKey, locale: Locale, focus?: "search" | "list", inDetail?: boolean): string {
   const base = t("panel.help.base", locale);
+  if (inDetail) return `${base} · ← back · a audit · i/r/u action · Esc close`;
   if (focus === "search") return `${base} · ↵ search · Esc clear`;
   if (tab === "settings") return `${base} · ${t("panel.help.config", locale)}`;
-  return `${base} · / 🔍`;
+  return `${base} · / 🔍 · ? help`;
 }
 
 function emptyMessage(tab: TabKey, locale: Locale): string {
