@@ -184,8 +184,10 @@ export async function showPackagesPanel(
       } else {
         // Filter chips (only for package tabs)
         renderFilterChips();
+        container.addChild(new DynamicBorder((s: string) => theme.fg("borderMuted", s)));
         preparePackageData();
         renderSearchBar();
+        container.addChild(new DynamicBorder((s: string) => theme.fg("borderMuted", s)));
         renderPackageList();
       }
 
@@ -469,7 +471,7 @@ export async function showPackagesPanel(
 
     async function loadBrowse() {
       try {
-        cachedCatalog = await fetchFullCatalog(80);
+        cachedCatalog = await fetchFullCatalog();
       } catch {
         cachedCatalog = [];
       }
