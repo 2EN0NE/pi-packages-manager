@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-06-04
+
+### Fixed
+
+- **Visual section separators**: added `DynamicBorder` separators between
+  filter chips, search bar, and package list in the panel, so each section
+  is visually distinct instead of blending together.
+- **Larger default catalog**: removed the hardcoded 80-item cap in the
+  Browse tab. It now loads up to 250 community packages by default, so
+  more packages show up without manual refresh.
+
 ## [1.2.0] - 2026-06-04
 
 ### Added
