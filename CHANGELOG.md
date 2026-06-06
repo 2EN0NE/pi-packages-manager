@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2] - 2026-06-06
+
+### Added
+
+- **包详情 README 渲染（K）**：在包详情页基础信息和动作按钮之间，新增
+  「📖 README」分隔区域，自动从 npm registry 拉取并渲染 README，支持
+  Markdown 语法（标题、列表、代码块等）。没有 README 时显示多语言提示。
+  覆盖 zh-CN / zh-TW / en / ja / ko 五种语言。
+
+### Improved
+
+- **安装进度实时显示（L）**：按 `i` 安装包后，不再只显示静态的
+  "📥 Installing..."，而是逐行滚动展示 `pi install` 的实际输出（npm
+  fetching / extracting / registering 等），最多显示最近 6 行，长行自动
+  截断到 90 字符。安装结束（成功 ✅ / 失败 ❌）后保留最后一帧 350ms
+  让用户看清结果，再切换到通知。改善长时间安装时的等待体验。
+
 ## [1.2.1] - 2026-06-04
 
 ### Fixed

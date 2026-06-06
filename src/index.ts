@@ -21,6 +21,7 @@ import {
   getPackageDetail,
   checkForUpdates,
   runPiInstallAsync,
+  runPiInstallStreaming,
   runPiUninstallAsync,
   removeFromSettings,
   fetchFullCatalog,
@@ -139,6 +140,28 @@ export default function pluginManager(pi: ExtensionAPI) {
   function updateLoading(ctx: ExtensionCommandContext, message: string) {
     ctx.ui.setWidget(LOADING_KEY, [`  ⠋ ${message}`, ""]);
     ctx.ui.setStatus("packages-list", message);
+  }
+
+  /**
+   * v1.2.2: 安装进度展示。逐行滚动展示最近 6 行输出，让用户看到 "pi install" 的实时进度。
+   * 入参 lines 是一个 mutable 数组，调用方随 streaming 回调 push 进去。
+   */
+  function showInstallProgress(
+    ctx: ExtensionCommandContext,
+    pkgName: string,
+    lines: string[],
+    status: "running" | "done" | "error" = "running",
+  ) {
+    const spinner = status === "running" ? "⠋" : status === "done" ? "✅" : "❌";
+    const header = `  ${spinner} 📥 ${t("install.running", locale)} ${pkgName}`;
+    const visibleLines = lines.slice(-6);
+    const body = visibleLines.map((ln) => {
+      // 截断超长行，保留 90 个字符宽度
+      const trimmed = ln.length > 90 ? ln.slice(0, 87) + "..." : ln;
+      return `  ${"·"} ${trimmed}`;
+    });
+    ctx.ui.setWidget(LOADING_KEY, [header, ...body, ""]);
+    ctx.ui.setStatus("packages-list", `Installing ${pkgName}...`);
   }
 
   function clearLoading(ctx: ExtensionCommandContext) {
@@ -615,9 +638,22 @@ export default function pluginManager(pi: ExtensionAPI) {
 
     if (!confirmed) return;
 
-    showLoading(ctx, `📥 ${t("install.running", locale)} ${pkgName}...`);
+    // v1.2.2: streaming install 进度展示，逐行滚动
+    const progressLines: string[] = [];
+    showInstallProgress(ctx, pkgName, progressLines, "running");
 
-    const result = await runPiInstallAsync(pkgName, scope);
+    const result = await runPiInstallStreaming(
+      pkgName,
+      scope,
+      (line) => {
+        progressLines.push(line);
+        showInstallProgress(ctx, pkgName, progressLines, "running");
+      },
+    );
+
+    showInstallProgress(ctx, pkgName, progressLines, result.success ? "done" : "error");
+    // 让用户看到最后一帧（成功/失败标记）
+    await new Promise((r) => setTimeout(r, 350));
 
     clearLoading(ctx);
     if (result.success) {

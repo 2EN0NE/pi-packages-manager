@@ -284,6 +284,8 @@ const UI_TEXT: Record<string, Record<string, string>> = {
     "detail.downloads": "下载量",
     "detail.keywords": "关键词",
     "detail.loading": "正在加载",
+    "detail.readme": "README",
+    "detail.no_readme": "该包没有提供 README",
     // install
     "install.confirm": "确认安装",
     "install.running": "正在安装",
@@ -378,6 +380,8 @@ const UI_TEXT: Record<string, Record<string, string>> = {
     "detail.downloads": "下載量",
     "detail.keywords": "關鍵詞",
     "detail.loading": "正在載入",
+    "detail.readme": "README",
+    "detail.no_readme": "該包沒有提供 README",
     // install
     "install.confirm": "確認安裝",
     "install.running": "正在安裝",
@@ -467,6 +471,8 @@ const UI_TEXT: Record<string, Record<string, string>> = {
     "detail.downloads": "Downloads",
     "detail.keywords": "Keywords",
     "detail.loading": "Loading",
+    "detail.readme": "README",
+    "detail.no_readme": "No README available for this package",
     // install
     "install.confirm": "Confirm install",
     "install.running": "Installing",
@@ -556,6 +562,8 @@ const UI_TEXT: Record<string, Record<string, string>> = {
     "detail.downloads": "ダウンロード数",
     "detail.keywords": "キーワード",
     "detail.loading": "読み込み中",
+    "detail.readme": "README",
+    "detail.no_readme": "このパッケージには README がありません",
     // install
     "install.confirm": "インストールを確認",
     "install.running": "インストール中",
@@ -645,6 +653,8 @@ const UI_TEXT: Record<string, Record<string, string>> = {
     "detail.downloads": "다운로드",
     "detail.keywords": "키워드",
     "detail.loading": "불러오는 중",
+    "detail.readme": "README",
+    "detail.no_readme": "이 패키지에는 README가 없습니다",
     // install
     "install.confirm": "설치 확인",
     "install.running": "설치 중",

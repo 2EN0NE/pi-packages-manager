@@ -26,12 +26,16 @@
  */
 
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { DynamicBorder } from "@earendil-works/pi-coding-agent";
+import {
+  DynamicBorder,
+  getMarkdownTheme,
+} from "@earendil-works/pi-coding-agent";
 import {
   Box,
   Container,
   Input,
   Key,
+  Markdown,
   matchesKey,
   type SelectItem,
   SelectList,
@@ -373,6 +377,26 @@ export async function showPackagesPanel(
 
       for (const line of lines) {
         container.addChild(new Text(line, 0, 0));
+      }
+
+      // v1.2.2: README inline rendering
+      if (info.readme) {
+        container.addChild(new Spacer(1));
+        container.addChild(new DynamicBorder((s: string) => theme.fg("borderMuted", s)));
+        container.addChild(new Text(theme.fg("dim", `  📖 ${t("detail.readme", locale)}`), 0, 0));
+        try {
+          const mdTheme = getMarkdownTheme();
+          container.addChild(new Markdown(info.readme, 1, 0, mdTheme));
+        } catch {
+          // Markdown component unavailable — fall back to plain text
+          const previewLines = info.readme.split("\n").slice(0, 30);
+          for (const ln of previewLines) {
+            container.addChild(new Text(`  ${theme.fg("muted", ln)}`, 0, 0));
+          }
+        }
+      } else if (!detailLoading) {
+        container.addChild(new Spacer(1));
+        container.addChild(new Text(theme.fg("dim", `  📖 ${t("detail.no_readme", locale)}`), 0, 0));
       }
 
       // Action buttons

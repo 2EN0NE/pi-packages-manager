@@ -38,6 +38,7 @@ export interface PackageInfo {
   installedVersion?: string;
   npmUrl?: string;
   repoUrl?: string;
+  readme?: string;
   piManifest?: Record<string, unknown>;
   searchScore?: number;
   searchReasons?: string[];
@@ -284,6 +285,7 @@ export async function getPackageDetail(pkgName: string): Promise<PackageInfo | n
         : undefined,
       npmUrl: `https://www.npmjs.com/package/${npmName}`,
       repoUrl: repoObj?.url?.replace(/^git\+/, "").replace(/\.git$/, "") || "",
+      readme: typeof data.readme === "string" && data.readme.trim() ? data.readme : "",
       piManifest: (pkgJson.pi as Record<string, unknown>) || {},
     };
   } catch {
@@ -658,7 +660,7 @@ export function runPiInstall(pkgName: string): { success: boolean; output: strin
 export async function runPiInstallAsync(pkgName: string, scope: "user" | "project" = "user"): Promise<{ success: boolean; output: string }> {
   // Pre-flight: check npm cache health (lightweight sync check first, async deep check only if needed)
   const quickCheck = detectNpmCachePermissionIssues();
-  if (quickCheck.count > 0) {
+ if (quickCheck.count > 0) {
     const cacheCheck = await ensureNpmCacheHealthyAsync();
     if (!cacheCheck.ok) {
       return { success: false, output: `npm cache permission error:\n${cacheCheck.message}` };
@@ -683,6 +685,126 @@ export async function runPiInstallAsync(pkgName: string, scope: "user" | "projec
         resolve({ success: true, output: stdout });
       }
     });
+  });
+}
+
+/**
+ * Streaming 版本的 pi install。按行回调进度，适合 UI 展示实时输出。
+ * 行为与 runPiInstallAsync 一致，但能在安装过程中逐行推送 stdout/stderr。
+ */
+export async function runPiInstallStreaming(
+  pkgName: string,
+  scope: "user" | "project" = "user",
+  onProgress?: (line: string) => void,
+): Promise<{ success: boolean; output: string }> {
+  // Pre-flight: check npm cache health
+  const quickCheck = detectNpmCachePermissionIssues();
+  if (quickCheck.count > 0) {
+    const cacheCheck = await ensureNpmCacheHealthyAsync();
+    if (!cacheCheck.ok) {
+      return { success: false, output: `npm cache permission error:\n${cacheCheck.message}` };
+    }
+  }
+
+  const { spawn } = await import("node:child_process");
+  const source = normalizeInstallSource(pkgName);
+  const args = scope === "project" ? ["install", source, "-l"] : ["install", source];
+
+  return new Promise((resolve) => {
+    const child = spawn("pi", args, {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    const stdoutChunks: string[] = [];
+    const stderrChunks: string[] = [];
+    let stdoutBuffer = "";
+    let stderrBuffer = "";
+    let stdoutClosed = false;
+    let stderrClosed = false;
+    let killed = false;
+
+    const timer = setTimeout(() => {
+      killed = true;
+      child.kill("SIGTERM");
+      setTimeout(() => child.kill("SIGKILL"), 2000);
+    }, 120_000);
+
+    const emitLines = (chunk: string, isStderr: boolean) => {
+      const text = (isStderr ? stderrBuffer : stdoutBuffer) + chunk;
+      const lines = text.split(/\r?\n/);
+      // 最后一段可能是不完整的行，暂存在 buffer 里
+      if (isStderr) stderrBuffer = lines.pop() || "";
+      else stdoutBuffer = lines.pop() || "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        if (isStderr) stderrChunks.push(trimmed);
+        else stdoutChunks.push(trimmed);
+        if (onProgress) {
+          try {
+            onProgress(trimmed);
+          } catch {
+            // 回调失败不影响安装流程
+          }
+        }
+      }
+    };
+
+    child.stdout?.on("data", (chunk: Buffer | string) => emitLines(String(chunk), false));
+    child.stderr?.on("data", (chunk: Buffer | string) => emitLines(String(chunk), true));
+
+    child.stdout?.on("end", () => { stdoutClosed = true; });
+    child.stderr?.on("end", () => { stderrClosed = true; });
+
+    const finalize = (code: number | null, signal: NodeJS.Signals | null) => {
+      clearTimeout(timer);
+      // flush 残留的 buffer
+      if (stdoutBuffer.trim()) {
+        stdoutChunks.push(stdoutBuffer.trim());
+        if (onProgress) {
+          try { onProgress(stdoutBuffer.trim()); } catch {}
+        }
+      }
+      if (stderrBuffer.trim()) {
+        stderrChunks.push(stderrBuffer.trim());
+        if (onProgress) {
+          try { onProgress(stderrBuffer.trim()); } catch {}
+        }
+      }
+
+      if (killed) {
+        resolve({
+          success: false,
+          output: "Install timed out after 120s and was terminated.",
+        });
+        return;
+      }
+
+      const combined = stderrChunks.length > 0
+        ? stderrChunks.join("\n")
+        : stdoutChunks.join("\n");
+
+      if (code === 0 && !signal) {
+        resolve({ success: true, output: stdoutChunks.join("\n") });
+      } else {
+        resolve({ success: false, output: enhanceNpmError(combined || `Install failed (exit ${code})`) });
+      }
+    };
+
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      resolve({
+        success: false,
+        output: enhanceNpmError(err.message || "Failed to spawn pi install"),
+      });
+    });
+
+    child.on("close", (code, signal) => finalize(code, signal));
+
+    // 防止“stdout/stderr 永不关闭”这种边缘情况导致 Promise 不 resolve
+    // 实际上 close 事件已经足够，这里不做额外处理
+    void stdoutClosed; void stderrClosed;
   });
 }
 

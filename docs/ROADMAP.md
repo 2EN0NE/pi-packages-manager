@@ -53,6 +53,11 @@ pi-packages-manager 后续版本迭代计划。按优先级排列，标注工作
 - ✅ Filter chips / 搜索栏 / 包列表之间加分隔线，视觉层次更清晰
 - ✅ Browse tab 默认拉取数量从 80 提升到 250，能看到更多社区包
 
+### v1.2.2 — 包详情 README + 安装进度（2026-06-06）
+
+- ✅ **K. 包详情 README 渲染** — 详情页内嵌 README，Markdown 渲染（标题/列表/代码块），5 语言 i18n 兼底
+- ✅ **L. 安装进度实时显示** — `i` 安装后逐行滚动展示 `pi install` 输出，最近 6 行 + 90 字截断 + 末帧保留 350ms
+
 ---
 
 ### v1.3.0 — 质量 + 扩展
@@ -62,10 +67,8 @@ pi-packages-manager 后续版本迭代计划。按优先级排列，标注工作
 | **C** | 🌐 pi.dev 数据富化 | 动态检测可用 web fetch 工具（tinyfish / web-fetch 等），搜索结果补全 pi.dev 上的展示数据（截图、分类标签） | 1 天 |
 | **I** | 🧪 扩展测试 | `search.ts`（filter parser、ranking）、`locale.ts`（持久化优先级）、`api.ts`（mock registry）。已有 security.ts 的 14 个测试，补充其他模块 | 1-2 天 |
 | **J** | ⚙️ Settings 扩展 | catalog 缓存状态 + 刷新、项目级 vs 全局级语言开关、偏好重置、pi config 集成 | 1 天 |
-| **K** | 📖 包详情 README 渲染 | 详情页展示包的 README（用 pi-tui 的 Markdown 组件） | 1 天 |
-| **L** | 📦 安装进度条 | 捕获 `pi install` stdout，在面板内展示安装进度 | 0.5 天 |
 
-**预计工期：3.5-4.5 天**
+**预计工期：3-4 天**
 
 ---
 
