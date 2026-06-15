@@ -5,7 +5,7 @@ Pi packages without leaving Pi. Inspired by the Claude Code package UX.
 
 [English](README.md) · [简体中文](docs/README.zh-CN.md) · [Pi Discussion](https://github.com/earendil-works/pi/discussions/5322) · [npm](https://www.npmjs.com/package/pi-packages-manager)
 
-![status](https://img.shields.io/badge/status-1.3.2-blue)
+![status](https://img.shields.io/badge/status-1.4.0-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
 ## Features
@@ -201,7 +201,7 @@ npm test
 
 See [docs/ROADMAP.md](docs/ROADMAP.md).
 
-Next up: pi.dev 文字元数据富化（分类标签、简短描述）+ 扩展测试覆盖。详见 [docs/ROADMAP.md](docs/ROADMAP.md)。
+Next up: 扩展测试覆盖（search/locale/api 模块）。详见 [docs/ROADMAP.md](docs/ROADMAP.md)。
 
 ## License
 

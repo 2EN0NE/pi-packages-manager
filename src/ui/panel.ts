@@ -158,7 +158,7 @@ export async function showPackagesPanel(
         title: (s: string) => theme.fg("text", s),
         badge: (s: string) => theme.fg("success", s),
         description: (s: string) => theme.fg("muted", s),
-        meta: (s: string) => theme.fg("dim", s),
+        meta: (s: string) => s, // 内容已在 packageToListItem 中着色，这里透传
         scrollInfo: (s: string) => theme.fg("dim", s),
         empty: (s: string) => theme.fg("muted", s),
         bullet: (s: string) => theme.fg("muted", s),
@@ -294,7 +294,7 @@ export async function showPackagesPanel(
     }
 
     function renderPackageList() {
-      const items = currentPkgs.map((p) => packageToListItem(p, locale));
+      const items = currentPkgs.map((p) => packageToListItem(p, locale, theme));
       list = new PackageList(items, 4, listTheme(), {
         emptyLabel: emptyMessage(currentTab, locale),
       });
@@ -811,7 +811,7 @@ export async function showPackagesPanel(
         const query = searchInput.getValue();
         applySearch(query);
         if (list) {
-          const items = currentPkgs.map((p) => packageToListItem(p, locale));
+          const items = currentPkgs.map((p) => packageToListItem(p, locale, theme));
           list.setItems(items);
         }
         tui.requestRender();
@@ -848,13 +848,34 @@ function collectPackages(
   return [];
 }
 
-function packageToListItem(pkg: PackageInfo, locale: Locale): PackageListItem {
+function typeColor(type: string): string {
+  switch (type) {
+    case "extension": return "accent";
+    case "skill": return "success";
+    case "prompt": return "warning";
+    case "theme": return "muted";
+    default: return "dim";
+  }
+}
+
+function packageToListItem(
+  pkg: PackageInfo,
+  locale: Locale,
+  theme: { fg: (color: string, text: string) => string },
+): PackageListItem {
   const desc = getTranslatedDescription(pkg.name, pkg.description, locale);
+  const dim = (s: string) => theme.fg("dim", s);
+  const sep = dim(" · ");
   const metaParts: string[] = [];
-  if (pkg.types?.length) metaParts.push(pkg.types.join("·"));
-  if (pkg.scope) metaParts.push(pkg.scope);
-  if (pkg.sourceType) metaParts.push(pkg.sourceType);
-  if (pkg.downloads) metaParts.push(`${formatNumber(pkg.downloads)}/mo`);
+  if (pkg.types?.length) {
+    // 类型彩色 chip：extension/skill/prompt/theme 各配辨识色
+    metaParts.push(
+      pkg.types.map((tp) => theme.fg(typeColor(tp), localizeType(tp, locale))).join(dim("·")),
+    );
+  }
+  if (pkg.scope) metaParts.push(dim(pkg.scope));
+  if (pkg.sourceType) metaParts.push(dim(pkg.sourceType));
+  if (pkg.downloads) metaParts.push(dim(`${formatNumber(pkg.downloads)}/mo`));
   const badge = pkg.installedVersion
     ? `✅ v${pkg.installedVersion}`
     : pkg.installed
@@ -865,7 +886,7 @@ function packageToListItem(pkg: PackageInfo, locale: Locale): PackageListItem {
     title: pkg.name,
     badge: badge || undefined,
     description: desc || "",
-    meta: metaParts.join(" · "),
+    meta: metaParts.join(sep),
   };
 }
 

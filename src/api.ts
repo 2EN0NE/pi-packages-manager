@@ -18,6 +18,12 @@ const PROJECT_NPM_DIR = join(process.cwd(), ".pi/npm/node_modules");
 const CACHE_FILE = join(HOME, ".pi/agent/cache/pi-packages-manager/catalog.json");
 const CATALOG_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
+// pi.dev 列表页：npm search API 不返回下载量，pi.dev 的 SSR HTML 在每个包卡片上
+// 注入了 data-package-name / data-package-downloads（精确整数），正好补这个缺口。
+// 注意：列表页只暴露按下载量排序的前 50 个热门包，长尾包不会有下载量。
+const PI_DEV_URL = "https://pi.dev/packages";
+let piDevDownloadsCache: Map<string, number> | null = null;
+
 // ─── Types ───────────────────────────────────────────────
 
 export interface PackageInfo {
@@ -146,6 +152,7 @@ function invalidateInstalledCache(): void {
 
 export function clearCatalogCache(): void {
   catalogCache = null;
+  piDevDownloadsCache = null;
   invalidateInstalledCache();
   try {
     writeFileSync(CACHE_FILE, JSON.stringify({ fetchedAt: 0, packages: [] }, null, 2), "utf-8");
@@ -191,6 +198,7 @@ export function getCatalogCacheInfo(): {
 export async function refreshCatalogCache(): Promise<{ success: boolean; info: ReturnType<typeof getCatalogCacheInfo> }> {
   try {
     catalogCache = null;
+    piDevDownloadsCache = null;
     await fetchFullCatalog(250, true);
     return { success: true, info: getCatalogCacheInfo() };
   } catch {
@@ -238,6 +246,21 @@ export async function fetchFullCatalog(size = 250, forceRefresh = false): Promis
   }
 
   const ranked = rankPackages(allResults, "", size);
+
+  // 用 pi.dev 补充月下载量（npm search 不提供），失败静默降级：
+  // 拿不到下载量的包保持 undefined，不影响浏览和安装。
+  try {
+    const dlMap = await fetchPiDevDownloads();
+    if (dlMap.size > 0) {
+      for (const pkg of ranked) {
+        const dl = dlMap.get(pkg.name);
+        if (dl !== undefined) pkg.downloads = dl;
+      }
+    }
+  } catch {
+    // 降级：网络/解析失败时保持现状
+  }
+
   catalogCache = ranked;
   writeCatalogCache(ranked);
   return ranked;
@@ -955,6 +978,36 @@ interface NpmSearchResponse {
     };
     downloads?: { monthly?: number };
   }>;
+}
+
+/**
+ * 从 pi.dev 列表页抓取每个包的月下载量。
+ * npm search API 不返回下载量，pi.dev 的 SSR HTML 在每个包卡片上注入了
+ * data-package-name / data-package-downloads（精确整数，比页面上的 “114K/mo” 还准），
+ * 正好补这个缺口。抓取失败时返回空 Map（静默降级，不阻断主流程）。
+ * 注意：列表页只暴露按下载量排序的前 50 个热门包，长尾包不会有下载量。
+ */
+export async function fetchPiDevDownloads(): Promise<Map<string, number>> {
+  if (piDevDownloadsCache) return piDevDownloadsCache;
+  const result = new Map<string, number>();
+  const ctrl = fetchTimeout(15_000);
+  const resp = await fetch(PI_DEV_URL, { signal: ctrl.signal }).catch(() => null);
+  if (!resp || !resp.ok) return result;
+  const html = await resp.text().catch(() => "");
+  if (!html) return result;
+
+  // 每个卡片：<div data-package-name="xxx" ... data-package-downloads="114014" ...>
+  // 非贪婪 [\s\S]*? 限制在同一个卡片内配对，不跨包
+  const re = /data-package-name="([^"]+)"[\s\S]*?data-package-downloads="(\d+)"/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html)) !== null) {
+    const name = m[1];
+    const downloads = parseInt(m[2], 10);
+    if (name && !Number.isNaN(downloads)) result.set(name, downloads);
+  }
+
+  piDevDownloadsCache = result;
+  return result;
 }
 
 /** 原始 npm search，不追加 pi-coding-agent */

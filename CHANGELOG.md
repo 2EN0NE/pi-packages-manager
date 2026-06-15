@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-06-15
+
+### Added
+
+- **pi.dev 月下载量富化（C）**：npm search API 不返回下载量，新增
+  `fetchPiDevDownloads()` 从 pi.dev SSR HTML 抓取每个包的 `data-package-downloads`
+  （精确整数，比页面上的「114K/mo」还准），合并进 catalog 缓存。Browse / 搜索结果里
+  的热门包显示「114K/mo」，用户一眼看出包火不火。抓取失败静默降级，不阻断主流程。
+  覆盖 pi.dev 列表页前 50 个热门包（长尾包无下载量，符合直觉）。
+
+### Improved
+
+- **类型彩色 chip**：列表项的类型标签从纯文本升级为彩色 —— extension（强调色）、
+  skill（绿）、prompt（黄）、theme（灰），一眼区分包类型。
+
 ## [1.3.2] - 2026-06-09
 
 ### Changed
