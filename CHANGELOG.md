@@ -9,16 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **pi.dev 月下载量富化（C）**：npm search API 不返回下载量，新增
-  `fetchPiDevDownloads()` 从 pi.dev SSR HTML 抓取每个包的 `data-package-downloads`
-  （精确整数，比页面上的「114K/mo」还准），合并进 catalog 缓存。Browse / 搜索结果里
-  的热门包显示「114K/mo」，用户一眼看出包火不火。抓取失败静默降级，不阻断主流程。
-  覆盖 pi.dev 列表页前 50 个热门包（长尾包无下载量，符合直觉）。
+- **Installed tab / 详情页下载量**：这两个页面原本拿不到月下载量（Installed
+  读本地 package.json，详情页的 npm 单包接口不返回 downloads）。新增
+  `fetchNpmDownloadsBulk()` 调用 npm downloads API 补全——用户在已安装列表和
+  详情页都能看到包火不火（包括自己的包）。无作用域包批量查询（≤128/批），
+  scoped 包逐个查询（npm bulk 不支持 scoped）。任何失败静默降级。
+- **Browse 页下载量**：确认 npm search API 本就返回 downloads，Browse 一直有
+  数据（之前误判为缺失，已纠正）。
 
 ### Improved
 
 - **类型彩色 chip**：列表项的类型标签从纯文本升级为彩色 —— extension（强调色）、
   skill（绿）、prompt（黄）、theme（灰），一眼区分包类型。
+
+### Removed
+
+- 移除上一版误加的 pi.dev 下载量抓取代码（`fetchPiDevDownloads`）。调研发现
+  npm search API 本就提供下载量且更全（250 vs pi.dev 的 50），pi.dev 抓取基于
+  错误前提，是冗余代码。
 
 ## [1.3.2] - 2026-06-09
 

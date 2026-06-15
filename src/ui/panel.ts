@@ -47,6 +47,7 @@ import {
 import {
   checkForUpdates,
   fetchFullCatalog,
+  fetchNpmDownloadsBulk,
   getCatalogCacheInfo,
   getInstalledPackages,
   searchNpmRegistry,
@@ -99,6 +100,9 @@ export async function showPackagesPanel(
     let unfilteredPkgs: PackageInfo[] = [];
     let cachedCatalog: PackageInfo[] | null = null;
     let cachedUpdates: PackageInfo[] | null = null;
+    // Installed tab 的包读本地 package.json，没有 downloads 字段；
+    // 首次进入该 tab 时异步拉一次 npm 下载量合并进来。
+    let cachedInstalledDownloads: Map<string, number> | null = null;
     let focusTarget: "search" | "list" = "list";
     let activeFilter: FilterType = FILTER_ALL;
     let showHelp = false;
@@ -289,6 +293,13 @@ export async function showPackagesPanel(
     function preparePackageData() {
       langSelector = null;
       const pkgs = collectPackages(currentTab, cachedCatalog, cachedUpdates);
+      // Installed tab：合并 npm 下载量（本地数据无此字段）
+      if (currentTab === "installed" && cachedInstalledDownloads) {
+        for (const p of pkgs) {
+          const dl = cachedInstalledDownloads.get(p.name);
+          if (dl !== undefined) p.downloads = dl;
+        }
+      }
       unfilteredPkgs = pkgs;
       applyFilter();
     }
@@ -579,6 +590,24 @@ export async function showPackagesPanel(
       }
     }
 
+    // 为 Installed tab 异步拉取 npm 月下载量。本地 package.json 没有下载量，
+    // 这里补齐，让用户能看到自己装的包火不火（包括自己的包）。
+    async function loadInstalledDownloads() {
+      try {
+        const names = getInstalledPackages()
+          .map((p) => p.name)
+          .filter(Boolean);
+        cachedInstalledDownloads = await fetchNpmDownloadsBulk(names);
+      } catch {
+        cachedInstalledDownloads = new Map();
+      }
+      if (dismissed) return;
+      if (currentTab === "installed" && !detailPkg) {
+        rebuild();
+        tui.requestRender();
+      }
+    }
+
     // ─── Tab switching ───────────────────────────────
 
     function switchTab(direction: 1 | -1) {
@@ -600,6 +629,10 @@ export async function showPackagesPanel(
       if (next === "updates" && cachedUpdates === null) {
         cachedUpdates = [];
         loadUpdates();
+      }
+      if (next === "installed" && cachedInstalledDownloads === null) {
+        cachedInstalledDownloads = new Map();
+        loadInstalledDownloads();
       }
     }
 
@@ -691,6 +724,10 @@ export async function showPackagesPanel(
     if (initialTab === "updates" && cachedUpdates === null) {
       cachedUpdates = [];
       loadUpdates();
+    }
+    if (initialTab === "installed" && cachedInstalledDownloads === null) {
+      cachedInstalledDownloads = new Map();
+      loadInstalledDownloads();
     }
 
     // ─── Input handling ──────────────────────────────

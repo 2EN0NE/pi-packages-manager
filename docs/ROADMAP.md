@@ -71,14 +71,16 @@ pi-packages-manager 后续版本迭代计划。按优先级排列，标注工作
 
 ---
 
-### v1.4.0 — pi.dev 下载量富化 + 类型彩色 chip（2026-06-15）
+### v1.4.0 — 下载量全面覆盖 + 类型彩色 chip（2026-06-15）
 
-- ✅ **C. pi.dev 月下载量富化** — npm search API 不返回下载量，从 pi.dev SSR HTML
-  抓取每个包的 `data-package-downloads`（精确整数），合并进 catalog 缓存。Browse/搜索
-  结果里热门包显示「114K/mo」，用户一眼看出“火不火”。抓取失败静默降级，不影响主流程。
-  覆盖 pi.dev 列表页前 50 个热门包（长尾包无下载量，符合直觉）。
+- ✅ **C. 下载量富化（修正版）** — 调研发现 npm search API 本就返回 downloads，
+  Browse 页一直有数据（之前误判为缺失）。真正的缺口在 Installed tab（读本地
+  package.json）和详情页（npm 单包接口不返回）。新增 `fetchNpmDownloadsBulk()`
+  调 npm downloads API 补这俩页面的下载量：无作用域包批量查询（≤128/批），
+  scoped 包逐个查询（npm bulk 不支持 scoped）。用户能看到自己装的包火不火（包括自己的包）。
 - ✅ **类型彩色 chip** — 列表项的类型标签从纯文本升级为彩色：extension（强调色）/
   skill（绿）/ prompt（黄）/ theme（灰），一眼区分包类型。
+- 🗑 移除上一版误加的 pi.dev 抓取代码（基于“npm 不返回下载量”的错误前提，实则冗余）。
 
 ---
 
@@ -126,7 +128,7 @@ v1.3.0 ✅ Settings 扩展（缓存状态 + 快捷操作 + 偏好重置 + 语言
 v1.3.2 ✅ 版本号同步 pi.dev
   │
   ▼
-v1.4.0 ✅ pi.dev 下载量富化 + 类型彩色 chip ← 当前
+v1.4.0 ✅ 下载量全面覆盖（Installed+详情页）+ 类型彩色 chip ← 当前
   │
   ▼
 v1.3.x 🔜 扩展测试

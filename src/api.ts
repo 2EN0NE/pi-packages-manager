@@ -18,12 +18,6 @@ const PROJECT_NPM_DIR = join(process.cwd(), ".pi/npm/node_modules");
 const CACHE_FILE = join(HOME, ".pi/agent/cache/pi-packages-manager/catalog.json");
 const CATALOG_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
-// pi.dev 列表页：npm search API 不返回下载量，pi.dev 的 SSR HTML 在每个包卡片上
-// 注入了 data-package-name / data-package-downloads（精确整数），正好补这个缺口。
-// 注意：列表页只暴露按下载量排序的前 50 个热门包，长尾包不会有下载量。
-const PI_DEV_URL = "https://pi.dev/packages";
-let piDevDownloadsCache: Map<string, number> | null = null;
-
 // ─── Types ───────────────────────────────────────────────
 
 export interface PackageInfo {
@@ -152,7 +146,6 @@ function invalidateInstalledCache(): void {
 
 export function clearCatalogCache(): void {
   catalogCache = null;
-  piDevDownloadsCache = null;
   invalidateInstalledCache();
   try {
     writeFileSync(CACHE_FILE, JSON.stringify({ fetchedAt: 0, packages: [] }, null, 2), "utf-8");
@@ -198,7 +191,6 @@ export function getCatalogCacheInfo(): {
 export async function refreshCatalogCache(): Promise<{ success: boolean; info: ReturnType<typeof getCatalogCacheInfo> }> {
   try {
     catalogCache = null;
-    piDevDownloadsCache = null;
     await fetchFullCatalog(250, true);
     return { success: true, info: getCatalogCacheInfo() };
   } catch {
@@ -246,20 +238,6 @@ export async function fetchFullCatalog(size = 250, forceRefresh = false): Promis
   }
 
   const ranked = rankPackages(allResults, "", size);
-
-  // 用 pi.dev 补充月下载量（npm search 不提供），失败静默降级：
-  // 拿不到下载量的包保持 undefined，不影响浏览和安装。
-  try {
-    const dlMap = await fetchPiDevDownloads();
-    if (dlMap.size > 0) {
-      for (const pkg of ranked) {
-        const dl = dlMap.get(pkg.name);
-        if (dl !== undefined) pkg.downloads = dl;
-      }
-    }
-  } catch {
-    // 降级：网络/解析失败时保持现状
-  }
 
   catalogCache = ranked;
   writeCatalogCache(ranked);
@@ -333,6 +311,9 @@ export async function getPackageDetail(pkgName: string): Promise<PackageInfo | n
     const installedPkgs = getInstalledPackages();
     const isInstalled = installedPkgs.some((p) => p.name === npmName);
 
+    // 补全月下载量（npm registry 单包接口不返回，查 downloads API）
+    const dlMap = await fetchNpmDownloadsBulk([npmName]).catch(() => null);
+
     return {
       name: (data.name as string) || npmName,
       description: (pkgJson.description as string) || "",
@@ -345,7 +326,7 @@ export async function getPackageDetail(pkgName: string): Promise<PackageInfo | n
       license: (pkgJson.license as string) || "",
       keywords: (pkgJson.keywords as string[]) || [],
       types: extractTypesFromManifest(pkgJson.pi as Record<string, unknown> | undefined),
-      downloads: undefined,
+      downloads: dlMap?.get(npmName),
       installed: isInstalled,
       installedVersion: isInstalled
         ? installedPkgs.find((p) => p.name === npmName)?.installedVersion
@@ -981,32 +962,59 @@ interface NpmSearchResponse {
 }
 
 /**
- * 从 pi.dev 列表页抓取每个包的月下载量。
- * npm search API 不返回下载量，pi.dev 的 SSR HTML 在每个包卡片上注入了
- * data-package-name / data-package-downloads（精确整数，比页面上的 “114K/mo” 还准），
- * 正好补这个缺口。抓取失败时返回空 Map（静默降级，不阻断主流程）。
- * 注意：列表页只暴露按下载量排序的前 50 个热门包，长尾包不会有下载量。
+ * 从 npm downloads API 批量获取月下载量。
+ * 用于补全 Installed tab / 详情页的下载量缺口（这俩数据源原本无 downloads）。
+ *
+ * npm bulk 接口（`/downloads/point/last-month/a,b,c`）不支持 scoped 包，
+ * 所以拆分：无作用域包批量查（≤128/批），scoped 包逐个查。
+ * 任何失败都静默跳过（返回空 Map 中的缺失项），不阻断主流程。
  */
-export async function fetchPiDevDownloads(): Promise<Map<string, number>> {
-  if (piDevDownloadsCache) return piDevDownloadsCache;
+export async function fetchNpmDownloadsBulk(names: string[]): Promise<Map<string, number>> {
   const result = new Map<string, number>();
-  const ctrl = fetchTimeout(15_000);
-  const resp = await fetch(PI_DEV_URL, { signal: ctrl.signal }).catch(() => null);
-  if (!resp || !resp.ok) return result;
-  const html = await resp.text().catch(() => "");
-  if (!html) return result;
+  const unique = [...new Set(names.filter(Boolean))];
+  if (unique.length === 0) return result;
 
-  // 每个卡片：<div data-package-name="xxx" ... data-package-downloads="114014" ...>
-  // 非贪婪 [\s\S]*? 限制在同一个卡片内配对，不跨包
-  const re = /data-package-name="([^"]+)"[\s\S]*?data-package-downloads="(\d+)"/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(html)) !== null) {
-    const name = m[1];
-    const downloads = parseInt(m[2], 10);
-    if (name && !Number.isNaN(downloads)) result.set(name, downloads);
+  const scoped = unique.filter((n) => n.startsWith("@"));
+  const unscoped = unique.filter((n) => !n.startsWith("@"));
+
+  // 无作用域包：批量查询（≤128/批）
+  const BATCH = 128;
+  const unscopedBatches: string[][] = [];
+  for (let i = 0; i < unscoped.length; i += BATCH) {
+    unscopedBatches.push(unscoped.slice(i, i + BATCH));
+  }
+  const batchResults = await Promise.allSettled(
+    unscopedBatches.map((batch) => {
+      const url = `https://api.npmjs.org/downloads/point/last-month/${batch.map(encodeURIComponent).join(",")}`;
+      const ctrl = fetchTimeout(15_000);
+      return fetch(url, { signal: ctrl.signal }).then((r) => (r.ok ? r.json() : null));
+    }),
+  );
+  for (let i = 0; i < unscopedBatches.length; i++) {
+    const res = batchResults[i];
+    if (res.status !== "fulfilled" || !res.value) continue;
+    const data = res.value as Record<string, { downloads?: number }>;
+    for (const name of unscopedBatches[i]) {
+      const entry = data[name];
+      if (entry && typeof entry.downloads === "number") result.set(name, entry.downloads);
+    }
   }
 
-  piDevDownloadsCache = result;
+  // scoped 包：逐个查询（bulk 不支持）
+  const scopedResults = await Promise.allSettled(
+    scoped.map((name) => {
+      const url = `https://api.npmjs.org/downloads/point/last-month/${encodeURIComponent(name)}`;
+      const ctrl = fetchTimeout(15_000);
+      return fetch(url, { signal: ctrl.signal }).then((r) => (r.ok ? r.json() : null));
+    }),
+  );
+  scoped.forEach((name, i) => {
+    const res = scopedResults[i];
+    if (res.status !== "fulfilled" || !res.value) return;
+    const data = res.value as { downloads?: number };
+    if (typeof data.downloads === "number") result.set(name, data.downloads);
+  });
+
   return result;
 }
 
