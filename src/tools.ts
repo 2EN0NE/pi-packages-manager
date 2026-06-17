@@ -11,7 +11,13 @@
  * These tools complement the /packages-list command — both coexist.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+  type ExtensionAPI,
+  truncateHead,
+  formatSize,
+  DEFAULT_MAX_BYTES,
+  DEFAULT_MAX_LINES,
+} from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import {
@@ -23,6 +29,16 @@ import {
   type PackageInfo,
 } from "./api";
 import { auditPackage, RISK_BADGE } from "./security";
+
+/** 统一截断工具输出，避免大结果撜爆 LLM 上下文（官方 50KB / 2000 行上限）。 */
+function textResult(text: string, details: Record<string, unknown> = {}) {
+  const trunc = truncateHead(text, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
+  let out = trunc.content;
+  if (trunc.truncated) {
+    out += `\n\n[Results truncated: showing ${trunc.outputLines}/${trunc.totalLines} lines (${formatSize(trunc.outputBytes)} / ${formatSize(trunc.totalBytes)}). Refine your query or lower the limit.]`;
+  }
+  return { content: [{ type: "text" as const, text: out }], details };
+}
 
 export function registerTools(pi: ExtensionAPI): void {
   // ─── packages_search ────────────────────────────────
@@ -57,17 +73,11 @@ export function registerTools(pi: ExtensionAPI): void {
         const fullQuery = params.type ? `type:${params.type} ${params.query}` : params.query;
         results = await searchNpmRegistry(fullQuery, limit);
       } catch (err) {
-        return {
-          content: [{ type: "text", text: `Search failed: ${(err as Error).message}` }],
-          details: {},
-        };
+        return textResult(`Search failed: ${(err as Error).message}`);
       }
 
       if (results.length === 0) {
-        return {
-          content: [{ type: "text", text: `No packages found matching "${params.query}".` }],
-          details: { query: params.query, count: 0 },
-        };
+        return textResult(`No packages found matching "${params.query}".`, { query: params.query, count: 0 });
       }
 
       const lines = results.map((pkg, i) => {
@@ -78,10 +88,11 @@ export function registerTools(pi: ExtensionAPI): void {
       });
 
       const header = `Found ${results.length} package(s) matching "${params.query}":\n`;
-      return {
-        content: [{ type: "text", text: header + lines.join("\n") }],
-        details: { query: params.query, count: results.length, packages: results.map(formatPkgSummary) },
-      };
+      return textResult(header + lines.join("\n"), {
+        query: params.query,
+        count: results.length,
+        packages: results.map(formatPkgSummary),
+      });
     },
   });
 
@@ -105,10 +116,7 @@ export function registerTools(pi: ExtensionAPI): void {
       const detail = await getPackageDetail(params.name);
 
       if (!detail) {
-        return {
-          content: [{ type: "text", text: `Package "${params.name}" not found on npm.` }],
-          details: {},
-        };
+        return textResult(`Package "${params.name}" not found on npm.`);
       }
 
       const lines: string[] = [
@@ -140,10 +148,7 @@ export function registerTools(pi: ExtensionAPI): void {
 
       lines.push("", "Install:", `  pi install npm:${detail.name}`);
 
-      return {
-        content: [{ type: "text", text: lines.join("\n") }],
-        details: formatPkgSummary(detail),
-      };
+      return textResult(lines.join("\n"), formatPkgSummary(detail));
     },
   });
 
@@ -188,17 +193,14 @@ export function registerTools(pi: ExtensionAPI): void {
         lines.push("", "⚠️ Audit warnings:", ...report.errors.map((e) => `  - ${e}`));
       }
 
-      return {
-        content: [{ type: "text", text: lines.join("\n") }],
-        details: {
-          packageName: report.packageName,
-          version: report.version,
-          overallRisk: report.overallRisk,
-          findingCount: report.findings.length,
-          deepScanned: report.deepScanned,
-          errors: report.errors,
-        },
-      };
+      return textResult(lines.join("\n"), {
+        packageName: report.packageName,
+        version: report.version,
+        overallRisk: report.overallRisk,
+        findingCount: report.findings.length,
+        deepScanned: report.deepScanned,
+        errors: report.errors,
+      });
     },
   });
 
@@ -227,10 +229,7 @@ export function registerTools(pi: ExtensionAPI): void {
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const pkgName = params.name.trim();
       if (!pkgName) {
-        return {
-          content: [{ type: "text", text: "Please specify a package name to install." }],
-          details: {},
-        };
+        return textResult("Please specify a package name to install.");
       }
 
       // Run security audit first
@@ -257,18 +256,12 @@ export function registerTools(pi: ExtensionAPI): void {
           ],
         );
         if (!dangerChoice?.includes("Install anyway")) {
-          return {
-            content: [{ type: "text", text: `Installation of ${pkgName} cancelled by user.` }],
-            details: { installed: false, audit: report.overallRisk },
-          };
+          return textResult(`Installation of ${pkgName} cancelled by user.`, { installed: false, audit: report.overallRisk });
         }
       } else {
         const confirmed = await ctx.ui.confirm(`Install ${pkgName}?`, auditInfo);
         if (!confirmed) {
-          return {
-            content: [{ type: "text", text: `Installation of ${pkgName} cancelled by user.` }],
-            details: { installed: false, audit: report.overallRisk },
-          };
+          return textResult(`Installation of ${pkgName} cancelled by user.`, { installed: false, audit: report.overallRisk });
         }
       }
 
@@ -278,18 +271,12 @@ export function registerTools(pi: ExtensionAPI): void {
 
       if (result.success) {
         clearCatalogCache();
-        return {
-          content: [{
-            type: "text",
-            text: `✅ ${pkgName} installed successfully! (Audit: ${riskEmoji})\nRun /reload or restart Pi to activate new resources.`,
-          }],
-          details: { installed: true, audit: report.overallRisk },
-        };
+        return textResult(
+          `✅ ${pkgName} installed successfully! (Audit: ${riskEmoji})\nRun /reload or restart Pi to activate new resources.`,
+          { installed: true, audit: report.overallRisk },
+        );
       } else {
-        return {
-          content: [{ type: "text", text: `❌ Installation failed: ${result.output}` }],
-          details: { installed: false, error: result.output },
-        };
+        return textResult(`❌ Installation failed: ${result.output}`, { installed: false, error: result.output });
       }
     },
   });
