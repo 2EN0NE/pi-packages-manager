@@ -4,7 +4,7 @@
  * Persist user-selected locale for the manager.
  *
  * Storage: ~/.pi/agent/extensions/pi-packages-manager/data/preferences.json
- *   { "locale": "zh-CN" }
+ *   { "locale": "zh-CN", "translationUrl": "http://localhost:8989", "translationApiKey": "" }
  *
  * Project-level overrides are also supported via:
  *   <cwd>/.pi/pi-packages-manager.json   { "locale": "zh-CN" }
@@ -12,56 +12,58 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import {
-  getLocaleOverride,
-  type Locale,
-  setLocaleOverride,
-} from "./i18n";
+import { getLocaleOverride, type Locale, setLocaleOverride } from "./i18n";
 
 const HOME = process.env.HOME!;
 const GLOBAL_PREFS_FILE = join(
-  HOME,
-  ".pi/agent/extensions/pi-packages-manager/data/preferences.json",
+	HOME,
+	".pi/agent/extensions/pi-packages-manager/data/preferences.json",
 );
 const PROJECT_PREFS_FILE = ".pi/pi-packages-manager.json";
 
+export const DEFAULT_TRANSLATION_URL = "http://localhost:8989";
+
 interface Preferences {
-  locale?: Locale;
+	locale?: Locale;
+	translationUrl?: string;
+	translationApiKey?: string;
 }
 
 function readJsonSafe(path: string): Preferences {
-  try {
-    if (!existsSync(path)) return {};
-    return JSON.parse(readFileSync(path, "utf-8")) as Preferences;
-  } catch {
-    return {};
-  }
+	try {
+		if (!existsSync(path)) return {};
+		return JSON.parse(readFileSync(path, "utf-8")) as Preferences;
+	} catch {
+		return {};
+	}
 }
 
 function writeJson(path: string, value: Preferences): void {
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, "utf-8");
+	mkdirSync(dirname(path), { recursive: true });
+	writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, "utf-8");
 }
 
 /**
  * Load locale preference from project (preferred) then global,
  * apply it to the i18n module, and return the effective locale.
  */
-export function loadStoredLocale(cwd: string = process.cwd()): Locale | undefined {
-  const projectPath = join(cwd, PROJECT_PREFS_FILE);
-  const projectPrefs = readJsonSafe(projectPath);
-  if (projectPrefs.locale) {
-    setLocaleOverride(projectPrefs.locale);
-    return projectPrefs.locale;
-  }
+export function loadStoredLocale(
+	cwd: string = process.cwd(),
+): Locale | undefined {
+	const projectPath = join(cwd, PROJECT_PREFS_FILE);
+	const projectPrefs = readJsonSafe(projectPath);
+	if (projectPrefs.locale) {
+		setLocaleOverride(projectPrefs.locale);
+		return projectPrefs.locale;
+	}
 
-  const globalPrefs = readJsonSafe(GLOBAL_PREFS_FILE);
-  if (globalPrefs.locale) {
-    setLocaleOverride(globalPrefs.locale);
-    return globalPrefs.locale;
-  }
+	const globalPrefs = readJsonSafe(GLOBAL_PREFS_FILE);
+	if (globalPrefs.locale) {
+		setLocaleOverride(globalPrefs.locale);
+		return globalPrefs.locale;
+	}
 
-  return undefined;
+	return undefined;
 }
 
 /**
@@ -69,18 +71,54 @@ export function loadStoredLocale(cwd: string = process.cwd()): Locale | undefine
  * apply it immediately.
  */
 export function saveLocale(locale: Locale | undefined): void {
-  const prefs = readJsonSafe(GLOBAL_PREFS_FILE);
-  if (locale) {
-    prefs.locale = locale;
-  } else {
-    delete prefs.locale;
-  }
-  writeJson(GLOBAL_PREFS_FILE, prefs);
-  setLocaleOverride(locale);
+	const prefs = readJsonSafe(GLOBAL_PREFS_FILE);
+	if (locale) {
+		prefs.locale = locale;
+	} else {
+		delete prefs.locale;
+	}
+	writeJson(GLOBAL_PREFS_FILE, prefs);
+	setLocaleOverride(locale);
 }
 
 export function getStoredLocale(): Locale | undefined {
-  return getLocaleOverride();
+	return getLocaleOverride();
+}
+
+// ─── 翻译配置 ─────────────────────────────────────────
+
+/**
+ * 从全局 preferences 中读取翻译服务 URL。
+ */
+export function getTranslationUrl(): string {
+	const prefs = readJsonSafe(GLOBAL_PREFS_FILE);
+	return prefs.translationUrl || DEFAULT_TRANSLATION_URL;
+}
+
+/**
+ * 持久化翻译服务 URL。
+ */
+export function setTranslationUrl(url: string): void {
+	const prefs = readJsonSafe(GLOBAL_PREFS_FILE);
+	prefs.translationUrl = url || DEFAULT_TRANSLATION_URL;
+	writeJson(GLOBAL_PREFS_FILE, prefs);
+}
+
+/**
+ * 从全局 preferences 中读取翻译 API Key。
+ */
+export function getTranslationApiKey(): string {
+	const prefs = readJsonSafe(GLOBAL_PREFS_FILE);
+	return prefs.translationApiKey || "";
+}
+
+/**
+ * 持久化翻译 API Key。
+ */
+export function setTranslationApiKey(key: string): void {
+	const prefs = readJsonSafe(GLOBAL_PREFS_FILE);
+	prefs.translationApiKey = key || "";
+	writeJson(GLOBAL_PREFS_FILE, prefs);
 }
 
 /**
@@ -90,22 +128,30 @@ export function getStoredLocale(): Locale | undefined {
  * - "default": 没有偏好，使用 i18n 默认
  */
 export function getLocaleSource(cwd: string = process.cwd()): {
-  source: "project" | "global" | "default";
-  locale: Locale | undefined;
-  path: string | null;
+	source: "project" | "global" | "default";
+	locale: Locale | undefined;
+	path: string | null;
 } {
-  const projectPath = join(cwd, PROJECT_PREFS_FILE);
-  const projectPrefs = readJsonSafe(projectPath);
-  if (projectPrefs.locale) {
-    return { source: "project", locale: projectPrefs.locale, path: projectPath };
-  }
+	const projectPath = join(cwd, PROJECT_PREFS_FILE);
+	const projectPrefs = readJsonSafe(projectPath);
+	if (projectPrefs.locale) {
+		return {
+			source: "project",
+			locale: projectPrefs.locale,
+			path: projectPath,
+		};
+	}
 
-  const globalPrefs = readJsonSafe(GLOBAL_PREFS_FILE);
-  if (globalPrefs.locale) {
-    return { source: "global", locale: globalPrefs.locale, path: GLOBAL_PREFS_FILE };
-  }
+	const globalPrefs = readJsonSafe(GLOBAL_PREFS_FILE);
+	if (globalPrefs.locale) {
+		return {
+			source: "global",
+			locale: globalPrefs.locale,
+			path: GLOBAL_PREFS_FILE,
+		};
+	}
 
-  return { source: "default", locale: undefined, path: null };
+	return { source: "default", locale: undefined, path: null };
 }
 
 /**
@@ -113,43 +159,47 @@ export function getLocaleSource(cwd: string = process.cwd()): {
  * 返回被清除的偏好描述，用于 notify。
  */
 export function resetAllPreferences(cwd: string = process.cwd()): {
-  clearedGlobal: boolean;
-  clearedProject: boolean;
+	clearedGlobal: boolean;
+	clearedProject: boolean;
 } {
-  let clearedGlobal = false;
-  let clearedProject = false;
+	let clearedGlobal = false;
+	let clearedProject = false;
 
-  // 清全局
-  try {
-    if (existsSync(GLOBAL_PREFS_FILE)) {
-      const prefs = readJsonSafe(GLOBAL_PREFS_FILE);
-      if (prefs.locale) {
-        delete prefs.locale;
-        writeJson(GLOBAL_PREFS_FILE, prefs);
-        clearedGlobal = true;
-      }
-    }
-  } catch {
-    // ignore
-  }
+	// 清全局
+	try {
+		if (existsSync(GLOBAL_PREFS_FILE)) {
+			const prefs = readJsonSafe(GLOBAL_PREFS_FILE);
+			const hadLocale = !!prefs.locale;
+			const hadTranslation = !!prefs.translationUrl;
+			delete prefs.locale;
+			delete prefs.translationUrl;
+			delete prefs.translationApiKey;
+			if (hadLocale || hadTranslation) {
+				writeJson(GLOBAL_PREFS_FILE, prefs);
+				clearedGlobal = true;
+			}
+		}
+	} catch {
+		// ignore
+	}
 
-  // 清项目级
-  try {
-    const projectPath = join(cwd, PROJECT_PREFS_FILE);
-    if (existsSync(projectPath)) {
-      const prefs = readJsonSafe(projectPath);
-      if (prefs.locale) {
-        delete prefs.locale;
-        writeJson(projectPath, prefs);
-        clearedProject = true;
-      }
-    }
-  } catch {
-    // ignore
-  }
+	// 清项目级
+	try {
+		const projectPath = join(cwd, PROJECT_PREFS_FILE);
+		if (existsSync(projectPath)) {
+			const prefs = readJsonSafe(projectPath);
+			if (prefs.locale) {
+				delete prefs.locale;
+				writeJson(projectPath, prefs);
+				clearedProject = true;
+			}
+		}
+	} catch {
+		// ignore
+	}
 
-  // 重置内存中的 override
-  setLocaleOverride(undefined);
+	// 重置内存中的 override
+	setLocaleOverride(undefined);
 
-  return { clearedGlobal, clearedProject };
+	return { clearedGlobal, clearedProject };
 }

@@ -61,7 +61,26 @@ import {
 	SUPPORTED_LOCALES,
 	t,
 } from "../i18n";
-import { getLocaleSource } from "../locale";
+import {
+	getLocaleSource,
+	getTranslationUrl,
+	getTranslationApiKey,
+	setTranslationUrl,
+	setTranslationApiKey,
+	DEFAULT_TRANSLATION_URL,
+} from "../locale";
+import {
+	checkTranslationService,
+	pingTranslationService,
+	translateText,
+	parseReadme,
+	reconstructReadme,
+	getTranslationCache,
+	setTranslationCache,
+	clearTranslationCache,
+	getTranslationCacheInfo,
+	type ReadmeSection,
+} from "../translation";
 import { rankPackages } from "../search";
 import { auditPackage, RISK_BADGE } from "../security";
 import { PackageList, type PackageListItem } from "./package-list";
@@ -81,18 +100,29 @@ export type PanelResult =
 	| { action: "settings-clear-catalog" }
 	| { action: "settings-reset" }
 	| { action: "change-locale"; locale: Locale }
+	| { action: "settings-translation-url" }
+	| { action: "settings-translation-apikey" }
+	| { action: "settings-translation-test" }
+	| { action: "settings-translation-clear" }
 	| null;
 
 interface PanelOptions {
 	initialTab?: TabKey;
 	locale: Locale;
+	translationConnected?: boolean | null;
 }
 
 export async function showPackagesPanel(
 	ctx: ExtensionCommandContext,
 	options: PanelOptions,
 ): Promise<PanelResult> {
-	const { initialTab = "installed", locale } = options;
+	const {
+		initialTab = "installed",
+		locale,
+		translationConnected: initialTransConnected,
+	} = options;
+	const initialTransConnectedVal =
+		initialTransConnected === undefined ? null : initialTransConnected;
 
 	return ctx.ui.custom<PanelResult>((tui, theme, _kb, done) => {
 		let currentTab: TabKey = initialTab;
@@ -113,6 +143,12 @@ export async function showPackagesPanel(
 		let detailPkg: PackageInfo | null = null;
 		let detailAudit: Awaited<ReturnType<typeof auditPackage>> | null = null;
 		let detailLoading = false;
+
+		// Translation state (inline detail view)
+		let translationMode = false;
+		let translatedSections: ReadmeSection[] | null = null;
+		let translating: boolean = false; // true while async translation is running
+		const translationServiceCached: boolean | null = initialTransConnectedVal; // null = untested
 
 		let dismissed = false;
 		const safeDone = (result: PanelResult) => {
@@ -399,8 +435,67 @@ export async function showPackagesPanel(
 			detailPkg = null;
 			detailAudit = null;
 			detailLoading = false;
+			translationMode = false;
+			translatedSections = null;
+			translating = false;
 			rebuild();
 			tui.requestRender();
+		}
+
+		/** 并行翻译 README 的所有 section，逐段更新 UI */
+		async function translateAllSections(
+			baseUrl: string,
+			apiKey: string,
+			pkgName: string,
+			sections: ReadmeSection[],
+		) {
+			await Promise.allSettled(
+				sections.map(async (sec, idx) => {
+					// 跳过空 body 的 section
+					if (!sec.body.trim()) {
+						if (translatedSections) {
+							translatedSections[idx] = {
+								...sec,
+								translated: "",
+								loading: false,
+							};
+						}
+						return null;
+					}
+					const translated = await translateText(
+						baseUrl,
+						sec.body,
+						"en",
+						"zh-Hans",
+						apiKey,
+					);
+					if (translatedSections) {
+						translatedSections[idx] = { ...sec, translated, loading: false };
+					}
+					return translated;
+				}),
+			);
+
+			// 所有 section 完成后，保存到缓存
+			if (translatedSections && detailPkg?.readme) {
+				// 检查是否全部翻译完成（无 loading）
+				const allDone = translatedSections.every((s) => !s.loading);
+				if (allDone) {
+					setTranslationCache(
+						pkgName,
+						"en",
+						"zh-Hans",
+						detailPkg.readme,
+						translatedSections,
+					);
+				}
+			}
+
+			// 最后一次 UI 刷新（最后一次 section 完成已经触发了 rebuild）
+			if (!dismissed) {
+				rebuild();
+				tui.requestRender();
+			}
 		}
 
 		function renderDetailView() {
@@ -470,21 +565,35 @@ export async function showPackagesPanel(
 				container.addChild(new Text(line, 0, 0));
 			}
 
-			// v1.2.2: README inline rendering
+			// v1.2.2: README inline rendering (with translation support)
 			if (info.readme) {
 				container.addChild(new Spacer(1));
 				container.addChild(
 					new DynamicBorder((s: string) => theme.fg("borderMuted", s)),
 				);
-				container.addChild(
-					new Text(theme.fg("dim", `  📖 ${t("detail.readme", locale)}`), 0, 0),
-				);
+				const readmeLabel = translationMode
+					? theme.fg(
+							"accent",
+							`  📖 ${t("detail.readme", locale)} ${theme.fg("dim", "[翻译中]")}`,
+						)
+					: theme.fg("dim", `  📖 ${t("detail.readme", locale)}`);
+				container.addChild(new Text(readmeLabel, 0, 0));
 				try {
 					const mdTheme = getMarkdownTheme();
-					container.addChild(new Markdown(info.readme, 1, 0, mdTheme));
+					if (translationMode && translatedSections) {
+						// 翻译模式：重建 markdown，未完成的 section 显示 spinner
+						const md = reconstructReadme(translatedSections);
+						container.addChild(new Markdown(md, 1, 0, mdTheme));
+					} else {
+						container.addChild(new Markdown(info.readme, 1, 0, mdTheme));
+					}
 				} catch {
 					// Markdown component unavailable — fall back to plain text
-					const previewLines = info.readme.split("\n").slice(0, 30);
+					const source =
+						translationMode && translatedSections
+							? reconstructReadme(translatedSections)
+							: info.readme;
+					const previewLines = source.split("\n").slice(0, 30);
 					for (const ln of previewLines) {
 						container.addChild(new Text(`  ${theme.fg("muted", ln)}`, 0, 0));
 					}
@@ -510,6 +619,13 @@ export async function showPackagesPanel(
 				actionParts.push(theme.fg("accent", "  [a] Re-audit"));
 			}
 
+			if (info.readme) {
+				if (translating) {
+					actionParts.push(theme.fg("accent", "  ⠋ [t] Translating..."));
+				} else {
+					actionParts.push(theme.fg("accent", "  [t] Translate"));
+				}
+			}
 			if (info.installed) {
 				if (hasUpdate) actionParts.push(theme.fg("warning", "  [u] Update"));
 				actionParts.push(theme.fg("error", "  [r] Remove"));
@@ -553,6 +669,7 @@ export async function showPackagesPanel(
 				theme.fg("text", "  Detail View") +
 					theme.fg("dim", "─────────────────────────"),
 				theme.fg("dim", "  ← / Backspace   Back to list"),
+				theme.fg("dim", "  t               Toggle README translation"),
 				theme.fg("dim", "  Esc             Close panel"),
 			];
 
@@ -620,6 +737,91 @@ export async function showPackagesPanel(
 			};
 			langSelector.onCancel = () => safeDone(null);
 			container.addChild(langSelector);
+
+			container.addChild(
+				new DynamicBorder((s: string) => theme.fg("borderMuted", s)),
+			);
+
+			// === 翻译区 ===
+			const transUrl = getTranslationUrl();
+			const transKey = getTranslationApiKey();
+			container.addChild(
+				new Text(
+					theme.fg(
+						"accent",
+						theme.bold("  🌐 " + t("settings.section.translation", locale)),
+					),
+					1,
+					0,
+				),
+			);
+			container.addChild(
+				new Text(
+					theme.fg(
+						"dim",
+						`  ${t("settings.translation.url", locale)}: ${transUrl}`,
+					),
+					1,
+					0,
+				),
+			);
+			if (transKey) {
+				container.addChild(
+					new Text(
+						theme.fg(
+							"dim",
+							`  ${t("settings.translation.apikey", locale)}: ****${transKey.slice(-4)}`,
+						),
+						1,
+						0,
+					),
+				);
+			}
+			const svcStatus =
+				translationServiceCached === null
+					? t("settings.translation.status.unknown", locale)
+					: translationServiceCached
+						? t("settings.translation.status.ok", locale)
+						: t("settings.translation.status.err", locale);
+			const svcColor =
+				translationServiceCached === null
+					? "dim"
+					: translationServiceCached
+						? "success"
+						: "error";
+			container.addChild(
+				new Text(
+					theme.fg(
+						svcColor,
+						`  ${t("settings.translation.status", locale)}: ${svcStatus}`,
+					),
+					1,
+					0,
+				),
+			);
+			const cacheInfo2 = getTranslationCacheInfo();
+			const cacheLabel =
+				cacheInfo2.count > 0
+					? `${cacheInfo2.count} ${t("settings.translation.cached", locale)} (${(cacheInfo2.sizeBytes / 1024).toFixed(1)} KB)`
+					: t("settings.translation.cache.empty", locale);
+			container.addChild(
+				new Text(
+					theme.fg(
+						"dim",
+						`  ${t("settings.translation.cache", locale)}: ${cacheLabel}`,
+					),
+					1,
+					0,
+				),
+			);
+			// 快捷键提示
+			container.addChild(
+				new Text(
+					theme.fg("muted", `  ${t("settings.translation.shortcuts", locale)}`),
+					1,
+					0,
+				),
+			);
 
 			container.addChild(
 				new DynamicBorder((s: string) => theme.fg("borderMuted", s)),
@@ -997,12 +1199,29 @@ export async function showPackagesPanel(
 					return;
 				}
 				// 偏好重置快捷键
-				if (data === "x") {
+				if (data === "p") {
 					safeDone({ action: "settings-reset" });
 					return;
 				}
 				if (data === "g") {
 					safeDone({ action: "settings-config" });
+					return;
+				}
+				// 翻译快捷键
+				if (data === "m") {
+					safeDone({ action: "settings-translation-url" });
+					return;
+				}
+				if (data === "k") {
+					safeDone({ action: "settings-translation-apikey" });
+					return;
+				}
+				if (data === "y") {
+					safeDone({ action: "settings-translation-test" });
+					return;
+				}
+				if (data === "x") {
+					safeDone({ action: "settings-translation-clear" });
 					return;
 				}
 				langSelector?.handleInput(data);
@@ -1034,6 +1253,59 @@ export async function showPackagesPanel(
 				}
 				if (data === "a") {
 					handleQuickAudit();
+					return;
+				}
+				// t: 切换翻译模式
+				if (data === "t") {
+					if (!detailPkg.readme) {
+						ctx.ui.notify("No README to translate", "warning");
+						return;
+					}
+					if (!translationMode) {
+						// 进入翻译模式
+						const transUrl = getTranslationUrl();
+						translationMode = true;
+						const cached = getTranslationCache(
+							detailPkg.name,
+							"en",
+							"zh-Hans",
+							detailPkg.readme,
+						);
+						if (cached) {
+							translatedSections = cached;
+							rebuild();
+							tui.requestRender();
+						} else {
+							// 拆分 + 异步翻译
+							const sections = parseReadme(detailPkg.readme);
+							translatedSections = sections.map((s) => ({
+								...s,
+								loading: true,
+							}));
+							translating = true;
+							rebuild();
+							tui.requestRender();
+							// 并行翻译所有 section
+							translateAllSections(
+								transUrl,
+								getTranslationApiKey(),
+								detailPkg.name,
+								sections,
+							).finally(() => {
+								translating = false;
+								if (!dismissed) {
+									rebuild();
+									tui.requestRender();
+								}
+							});
+						}
+					} else {
+						// 切换回原文
+						translationMode = false;
+						translating = false;
+						rebuild();
+						tui.requestRender();
+					}
 					return;
 				}
 				// Enter in detail view also goes to full detail (for install/remove/update)
@@ -1277,7 +1549,8 @@ function buildHelpBar(
 	compact?: boolean,
 ): string {
 	const base = t("panel.help.base", locale);
-	if (inDetail) return `${base} · ← back · a audit · i/r/u action · Esc close`;
+	if (inDetail)
+		return `${base} · ← back · a audit · t translate · i/r/u action · Esc close`;
 	if (focus === "search") return `${base} · ↵ search · Esc clear`;
 	if (tab === "settings") return `${base} · ${t("panel.help.config", locale)}`;
 	const modeLabel = compact === true ? "[z] detailed" : "[z] compact";

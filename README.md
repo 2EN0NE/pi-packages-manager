@@ -183,6 +183,64 @@ with content:
 
 Supported locales: `en`, `zh-CN`, `zh-TW`, `ja`, `ko`.
 
+## Local Translation
+
+This extension supports real-time translation of package README documents via
+[MTranServer](https://github.com/xxnuo/MTranServer), an offline local
+translation engine. When enabled, press `t` in the package detail view to
+toggle between the original README and its Chinese (zh-Hans) translation.
+
+### Setup
+
+Start MTranServer with Docker:
+
+```bash
+docker run -d -p 8989:8989 xxnuo/mtranserver:latest
+```
+
+Then open the package manager panel, go to **Settings** (press `Tab`), and
+configure the translation section:
+
+| Key | Action |
+| --- | --- |
+| `m` | Modify MTranServer URL (default: `http://localhost:8989`) |
+| `k` | Modify API Key (leave empty for no auth) |
+| `y` | Test connection |
+| `x` | Clear README translation cache |
+
+### Usage
+
+When viewing a package detail page (press `Enter` on a package):
+
+| Key | Action |
+| --- | --- |
+| `t` | Toggle between original and translated README |
+
+The translation is **section-based** — the README is split by markdown
+headings (`##`, `###`, `####`), and each section is translated independently
+in parallel. While translating, a spinner indicator is shown for pending
+sections. Completed translations are cached to disk at:
+
+```text
+~/.pi/agent/extensions/pi-packages-manager/data/translations_readme.json
+```
+
+The cache persists across sessions. Press `t` again to switch back to the
+original README, and `t` once more to restore the translation (from cache).
+
+### API (for reference)
+
+MTranServer defaults:
+
+| Item | Value |
+| --- | --- |
+| Default URL | `http://localhost:8989` |
+| Health check | `GET /health` → 200 |
+| Translate | `POST /translate` |
+| Request | `{"from":"en","to":"zh-Hans","text":"..."}` |
+| Response | `{"result":"..."}` |
+| Auth | `Authorization: Bearer <key>` header (optional) |
+
 ## Development
 
 Run the extension directly from source:

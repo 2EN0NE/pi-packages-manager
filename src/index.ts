@@ -41,7 +41,20 @@ import {
 	SUPPORTED_LOCALES,
 	t,
 } from "./i18n";
-import { loadStoredLocale, resetAllPreferences, saveLocale } from "./locale";
+import {
+	loadStoredLocale,
+	resetAllPreferences,
+	saveLocale,
+	getTranslationUrl,
+	setTranslationUrl,
+	getTranslationApiKey,
+	setTranslationApiKey,
+} from "./locale";
+import {
+	checkTranslationService,
+	pingTranslationService,
+	clearTranslationCache,
+} from "./translation";
 import { showPackagesPanel } from "./ui/panel";
 import { auditPackage, RISK_BADGE, type AuditReport } from "./security";
 import { registerTools } from "./tools";
@@ -191,10 +204,12 @@ export default function pluginManager(pi: ExtensionAPI) {
 	 */
 	async function panelLoop(ctx: ExtensionCommandContext) {
 		let lastTab: "installed" | "browse" | "updates" | "settings" = "installed";
+		let translationConnected: boolean | null = null;
 		while (true) {
 			const result = await showPackagesPanel(ctx, {
 				locale,
 				initialTab: lastTab,
+				translationConnected,
 			});
 			if (!result) return;
 
@@ -204,7 +219,11 @@ export default function pluginManager(pi: ExtensionAPI) {
 				result.action === "settings-refresh-catalog" ||
 				result.action === "settings-clear-catalog" ||
 				result.action === "settings-reset" ||
-				result.action === "change-locale"
+				result.action === "change-locale" ||
+				result.action === "settings-translation-url" ||
+				result.action === "settings-translation-apikey" ||
+				result.action === "settings-translation-test" ||
+				result.action === "settings-translation-clear"
 			) {
 				lastTab = "settings";
 			} else if (result.action === "browse-search") {
@@ -277,6 +296,61 @@ export default function pluginManager(pi: ExtensionAPI) {
 					ctx.ui.notify(t("settings.reset.done", locale), "info");
 				} else {
 					ctx.ui.notify(t("settings.reset.noop", locale), "info");
+				}
+				continue;
+			}
+
+			// ── 翻译配置 ─────────────────────────────────────
+
+			if (result.action === "settings-translation-url") {
+				const current = getTranslationUrl();
+				const newUrl = await ctx.ui.input("MTranServer URL", current);
+				if (newUrl) {
+					setTranslationUrl(newUrl);
+					ctx.ui.notify("MTranServer URL 已更新", "info");
+				}
+				continue;
+			}
+
+			if (result.action === "settings-translation-apikey") {
+				const current = getTranslationApiKey();
+				const newKey = await ctx.ui.input(
+					"MTranServer API Key（留空=无鉴权）",
+					current,
+				);
+				// input 返回 undefined 表示取消，空字符串表示清空
+				if (newKey !== undefined) {
+					setTranslationApiKey(newKey || "");
+					ctx.ui.notify("API Key 已更新", "info");
+				}
+				continue;
+			}
+
+			if (result.action === "settings-translation-test") {
+				const url = getTranslationUrl();
+				const key = getTranslationApiKey();
+				showLoading(ctx, "正在测试 MTranServer 连接...");
+				const ok = await checkTranslationService(url, key);
+				clearLoading(ctx);
+				translationConnected = ok;
+				if (ok) {
+					const ping = await pingTranslationService(url, key);
+					ctx.ui.notify(`✅ MTranServer 连接成功 (${ping}ms)`, "info");
+				} else {
+					ctx.ui.notify(
+						`❌ 无法连接到 MTranServer，请检查地址和 API Key：${url}`,
+						"error",
+					);
+				}
+				continue;
+			}
+
+			if (result.action === "settings-translation-clear") {
+				const count = clearTranslationCache();
+				if (count > 0) {
+					ctx.ui.notify(`已清空 ${count} 个包的翻译缓存`, "info");
+				} else {
+					ctx.ui.notify("翻译缓存已为空", "info");
 				}
 			}
 		}

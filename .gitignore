@@ -8,3 +8,5 @@ build/
 .pi/
 *.tgz
 .npmrc
+
+.worktrees/
