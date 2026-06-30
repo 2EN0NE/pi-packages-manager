@@ -83,6 +83,7 @@ import {
 } from "../translation";
 import { rankPackages } from "../search";
 import { auditPackage, RISK_BADGE } from "../security";
+
 import { PackageList, type PackageListItem } from "./package-list";
 
 const TAB_KEYS = ["installed", "browse", "updates", "settings"] as const;
@@ -95,6 +96,7 @@ type FilterType = (typeof FILTER_TYPES)[number] | "all";
 export type PanelResult =
 	| { action: "detail"; pkg: PackageInfo }
 	| { action: "browse-search" }
+	| { action: "compare"; selectedPkgNames: string[] }
 	| { action: "settings-config" }
 	| { action: "settings-refresh-catalog" }
 	| { action: "settings-clear-catalog" }
@@ -248,6 +250,19 @@ export async function showPackagesPanel(
 				);
 				preparePackageData();
 				renderSearchBar();
+				// Selected count badge
+				if (list && list.selectedCount > 0) {
+					container.addChild(
+						new Text(
+							theme.fg(
+								"accent",
+								`  ☑ ${list.selectedCount} selected — press [c] to compare`,
+							),
+							1,
+							0,
+						),
+					);
+				}
 				container.addChild(
 					new DynamicBorder((s: string) => theme.fg("borderMuted", s)),
 				);
@@ -385,11 +400,23 @@ export async function showPackagesPanel(
 		}
 
 		function renderPackageList() {
+			// Preserve multi-selection and cursor position across rebuilds
+			const prevSelected = list?.selectedValues ?? new Set();
+			const prevIndex = list?.selectedIndex ?? 0;
+
 			const items = currentPkgs.map((p) => packageToListItem(p, locale, theme));
 			list = new PackageList(items, compactList ? 24 : 8, listTheme(), {
 				emptyLabel: emptyMessage(currentTab, locale),
 				compact: compactList,
 			});
+			// Restore multi-selection for items that still exist
+			if (prevSelected.size > 0) {
+				list.setSelectedValues(prevSelected);
+			}
+			// Restore cursor position
+			if (prevIndex > 0 && items.length > 0) {
+				list.setSelectedIndex(prevIndex);
+			}
 			list.onSelect = (item) => {
 				// v1.2.0: open inline detail instead of closing panel
 				const pkg = currentPkgs.find((p) => p.name === item.value);
@@ -665,6 +692,11 @@ export async function showPackagesPanel(
 				theme.fg("dim", "  r               Remove selected package"),
 				theme.fg("dim", "  u               Update selected package"),
 				theme.fg("dim", "  a               Run security audit"),
+				"",
+				theme.fg("text", "  Multi-Select") +
+					theme.fg("dim", "───────────────────────────"),
+				theme.fg("dim", "  Space           Toggle selection"),
+				theme.fg("dim", "  c               Compare selected (≥2)"),
 				"",
 				theme.fg("text", "  Detail View") +
 					theme.fg("dim", "─────────────────────────"),
@@ -1377,6 +1409,23 @@ export async function showPackagesPanel(
 					tui.requestRender();
 					return;
 				}
+				// c: 对比选中的包（需要 ≥2 个选中）
+				if (data === "c") {
+					const selectedValues = list?.selectedValues ?? new Set();
+					if (selectedValues.size < 2) {
+						// 提示至少选2个
+						ctx.ui.notify(
+							"Select ≥2 packages (press Space to select) before comparing",
+							"warning",
+						);
+						return;
+					}
+					safeDone({
+						action: "compare",
+						selectedPkgNames: [...selectedValues],
+					});
+					return;
+				}
 			}
 
 			// Focus search input
@@ -1445,6 +1494,14 @@ export async function showPackagesPanel(
 			if (matchesKey(data, Key.up) && list && list.isAtTop()) {
 				focusTarget = "search";
 				searchInput.focused = true;
+				rebuild();
+				tui.requestRender();
+				return;
+			}
+
+			// Space: handle multi-select toggle + rebuild to update badge
+			if (data === " ") {
+				list?.handleInput(data);
 				rebuild();
 				tui.requestRender();
 				return;
@@ -1554,7 +1611,7 @@ function buildHelpBar(
 	if (focus === "search") return `${base} · ↵ search · Esc clear`;
 	if (tab === "settings") return `${base} · ${t("panel.help.config", locale)}`;
 	const modeLabel = compact === true ? "[z] detailed" : "[z] compact";
-	return `${base} · / 🔍 · ? help · ${modeLabel}`;
+	return `${base} · Space sel · [c] compare · / 🔍 · ? help · ${modeLabel}`;
 }
 
 function emptyMessage(tab: TabKey, locale: Locale): string {

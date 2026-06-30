@@ -58,6 +58,7 @@ import {
 import { showPackagesPanel } from "./ui/panel";
 import { auditPackage, RISK_BADGE, type AuditReport } from "./security";
 import { registerTools } from "./tools";
+import { comparePackages, type CompareProgress } from "./compare";
 
 const PAGE_SIZE = 8;
 
@@ -352,6 +353,91 @@ export default function pluginManager(pi: ExtensionAPI) {
 				} else {
 					ctx.ui.notify("翻译缓存已为空", "info");
 				}
+				continue;
+			}
+
+			// ── 包对比 ───────────────────────────────────────
+
+			if (result.action === "compare") {
+				const pkgNames = result.selectedPkgNames;
+				if (pkgNames.length < 2) {
+					ctx.ui.notify("需要至少选中 2 个包才能对比", "warning");
+					continue;
+				}
+
+				// 让用户输入对比诉求
+				const comparePrompt = await ctx.ui.input(
+					`📊 对比 ${pkgNames.length} 个包`,
+					"输入对比关注点（例如：哪个更适合做代码审查？留空=综合对比）",
+				);
+				// 用户取消 → 返回面板
+				if (comparePrompt === undefined) continue;
+
+				// 加载包的详细信息（用于提供更多上下文）
+				const pkgs: PackageInfo[] = [];
+				for (const name of pkgNames) {
+					try {
+						const detail = await getPackageDetail(name);
+						if (detail) pkgs.push(detail);
+						else pkgs.push({ name, description: "", version: "", installed: false } as PackageInfo);
+					} catch {
+						pkgs.push({ name, description: "", version: "", installed: false } as PackageInfo);
+					}
+				}
+
+				// 开始对比，实时展示进度
+				const compareWidgetKey = "pi-packages-manager-compare";
+				const progressLines: string[] = [];
+				const SPINNER_CHARS = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
+				let spinnerIdx = 0;
+				const updateCompareWidget = (msg: string, done: boolean = false) => {
+					progressLines.push(msg);
+					const spin = done ? "" : SPINNER_CHARS[spinnerIdx++ % SPINNER_CHARS.length];
+					ctx.ui.setWidget(compareWidgetKey, [
+						`  ${spin} 📊 ${t("menu.title", locale)} — ${done ? "✅ 完成" : "对比中"}`,
+						"",
+						...progressLines.map((l) => `  ${l}`),
+						"",
+					]);
+					ctx.ui.setStatus("packages-list", msg);
+				};
+
+				updateCompareWidget(`开始对比 ${pkgs.length} 个包...`);
+
+				try {
+					const resultText = await comparePackages(
+						pkgs,
+						comparePrompt || "",
+						(progress: CompareProgress) => {
+							updateCompareWidget(progress.message);
+						},
+					);
+
+					// 展示完成状态（停止动画）
+					updateCompareWidget("✅ 对比完成", true);
+					await sleep(800);
+
+					ctx.ui.setWidget(compareWidgetKey, undefined);
+					ctx.ui.setStatus("packages-list", undefined);
+
+					// 展示对比结果
+					ctx.ui.notify(
+						[`📊 对比结果 — ${pkgNames.join(" vs ")}`, "", resultText].join("\n"),
+						"info",
+					);
+				} catch (err) {
+					// 展示失败状态（停止动画）
+					updateCompareWidget(`❌ 对比失败: ${err instanceof Error ? err.message : String(err)}`, true);
+					await sleep(800);
+
+					ctx.ui.setWidget(compareWidgetKey, undefined);
+					ctx.ui.setStatus("packages-list", undefined);
+					ctx.ui.notify(
+						`❌ 对比失败: ${err instanceof Error ? err.message : String(err)}`,
+						"error",
+					);
+				}
+				continue;
 			}
 		}
 	}

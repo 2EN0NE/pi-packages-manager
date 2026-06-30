@@ -28,6 +28,8 @@ export interface PackageListItem {
 	badge?: string;
 	description?: string;
 	meta?: string;
+	/** Optional sub-type hint for selection display */
+	type?: string;
 }
 
 export interface PackageListTheme {
@@ -52,10 +54,16 @@ export class PackageList {
 	private cachedLines?: string[];
 	private emptyLabel: string;
 	private _compact = false;
+	private _selectedValues: Set<string> = new Set();
 
+	/** Called when user presses Enter on an item */
 	public onSelect?: (item: PackageListItem) => void;
+	/** Called when user presses Esc */
 	public onCancel?: () => void;
+	/** Called when focused item changes */
 	public onSelectionChange?: (item: PackageListItem) => void;
+	/** Called when space toggles multi-select */
+	public onMultiSelectChange?: (selectedValues: Set<string>) => void;
 
 	constructor(
 		items: PackageListItem[],
@@ -89,10 +97,44 @@ export class PackageList {
 		this.invalidate();
 	}
 
+	get selectedValues(): Set<string> {
+		return this._selectedValues;
+	}
+
+	/** Get the count of currently multi-selected items. */
+	get selectedCount(): number {
+		return this._selectedValues.size;
+	}
+
+	/** Replace the selected-values set (e.g. after a list rebuild). */
+	/** Get the current cursor index within the list. */
+	get selectedIndex(): number {
+		return this.selected;
+	}
+
+	/** Restore the cursor to a specific index (clamped to valid range). */
+	setSelectedIndex(idx: number): void {
+		if (this.items.length === 0) return;
+		this.selected = Math.max(0, Math.min(idx, this.items.length - 1));
+		this.ensureVisible();
+		this.invalidate();
+	}
+
+	/** Replace the selected-values set (e.g. after a list rebuild). */
+	setSelectedValues(values: Set<string>): void {
+		this._selectedValues = new Set(values);
+		this.invalidate();
+	}
+
 	setItems(items: PackageListItem[]): void {
 		this.items = items;
 		this.selected = 0;
 		this.offset = 0;
+		// Prune any selected values no longer in the list
+		const valid = new Set(items.map((i) => i.value));
+		for (const v of this._selectedValues) {
+			if (!valid.has(v)) this._selectedValues.delete(v);
+		}
 		this.invalidate();
 	}
 
@@ -127,12 +169,27 @@ export class PackageList {
 			this.selected = Math.max(0, this.items.length - 1);
 			this.ensureVisible();
 			this.invalidate();
+		} else if (data === " ") {
+			this.toggleSelected();
 		} else if (matchesKey(data, Key.enter)) {
 			const item = this.items[this.selected];
 			if (item) this.onSelect?.(item);
 		} else if (matchesKey(data, Key.escape)) {
 			this.onCancel?.();
 		}
+	}
+
+	/** Toggle multi-selection for the currently focused item. */
+	private toggleSelected(): void {
+		const item = this.items[this.selected];
+		if (!item) return;
+		if (this._selectedValues.has(item.value)) {
+			this._selectedValues.delete(item.value);
+		} else {
+			this._selectedValues.add(item.value);
+		}
+		this.invalidate();
+		this.onMultiSelectChange?.(this._selectedValues);
 	}
 
 	private move(delta: number): void {
@@ -182,7 +239,8 @@ export class PackageList {
 		for (let i = start; i < end; i++) {
 			const item = this.items[i];
 			const isSelected = i === this.selected;
-			this.renderRow(lines, item, isSelected, width);
+			const isMultiSelected = this._selectedValues.has(item.value);
+			this.renderRow(lines, item, isSelected, isMultiSelected, width);
 			// Compact mode: no blank gap between items
 			if (!this._compact && i < end - 1) {
 				lines.push(""); // blank gap
@@ -207,9 +265,10 @@ export class PackageList {
 		lines: string[],
 		item: PackageListItem,
 		isSelected: boolean,
+		isMultiSelected: boolean,
 		width: number,
 	): void {
-		const bullet = isSelected
+		const bullet = isMultiSelected
 			? this.theme.selectedBullet("● ")
 			: this.theme.bullet("○ ");
 		const indent = "    ";
